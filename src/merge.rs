@@ -1,33 +1,43 @@
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Result};
+use thiserror::Error;
 
 use crate::sets::{ChecksConfig, IssueTemplateFile, LabelSpec, SetDefinition};
+use crate::settings::{BranchProtectionConfig, RepoSettings};
+
+#[derive(Debug, Error)]
+pub enum MergeError {
+    #[error("label conflict for '{0}' between sets; definitions differ")]
+    LabelConflict(String),
+    #[error("issue template conflict for '{0}' between sets")]
+    TemplateConflict(String),
+    #[error("{0} conflict between sets")]
+    GenericConflict(String),
+}
+
+pub type MergeResult<T> = Result<T, MergeError>;
 
 #[derive(Debug, Clone)]
 pub struct MergedRepoConfig {
     pub labels: Vec<LabelSpec>,
     pub issue_templates: Vec<IssueTemplateFile>,
-    pub repo_settings: Option<serde_json::Value>,
-    pub branch_protection: Option<serde_json::Value>,
+    pub repo_settings: Option<RepoSettings>,
+    pub branch_protection: Option<BranchProtectionConfig>,
     pub checks: Option<ChecksConfig>,
 }
 
-pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> Result<MergedRepoConfig> {
+pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConfig> {
     let mut labels = HashMap::new();
     let mut templates = HashMap::new();
-    let mut repo_settings: Option<serde_json::Value> = None;
-    let mut branch_protection: Option<serde_json::Value> = None;
+    let mut repo_settings: Option<RepoSettings> = None;
+    let mut branch_protection: Option<BranchProtectionConfig> = None;
     let mut checks: Option<ChecksConfig> = None;
 
     for set in sets {
         for label in &set.labels {
             match labels.get(&label.name) {
                 Some(existing) if existing != label => {
-                    return Err(anyhow!(
-                        "label conflict for '{}' between sets; definitions differ",
-                        label.name
-                    ));
+                    return Err(MergeError::LabelConflict(label.name.clone()));
                 }
                 _ => {
                     labels.insert(label.name.clone(), label.clone());
@@ -37,10 +47,7 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> Result<MergedRepoConfig> {
 
         for template in &set.issue_templates {
             if templates.contains_key(&template.path) {
-                return Err(anyhow!(
-                    "issue template conflict for '{}' between sets",
-                    template.path
-                ));
+                return Err(MergeError::TemplateConflict(template.path.clone()));
             }
             templates.insert(template.path.clone(), template.clone());
         }
@@ -68,9 +75,13 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> Result<MergedRepoConfig> {
     })
 }
 
-fn merge_or_conflict<T: PartialEq>(existing: Option<T>, incoming: T, what: &str) -> Result<Option<T>> {
+fn merge_or_conflict<T: PartialEq>(
+    existing: Option<T>,
+    incoming: T,
+    what: &str,
+) -> MergeResult<Option<T>> {
     match existing {
-        Some(current) if current != incoming => Err(anyhow!("{what} conflict between sets")),
+        Some(current) if current != incoming => Err(MergeError::GenericConflict(what.to_string())),
         Some(current) => Ok(Some(current)),
         None => Ok(Some(incoming)),
     }
@@ -125,7 +136,10 @@ mod tests {
             color: Some("00ff00".to_string()),
             description: None,
         });
-        assert!(merge_sets_for_repo(&[a, b]).is_err());
+        assert!(matches!(
+            merge_sets_for_repo(&[a, b]),
+            Err(MergeError::LabelConflict(_))
+        ));
     }
 
     #[test]
@@ -140,6 +154,9 @@ mod tests {
             path: ".github/ISSUE_TEMPLATE/bug.yml".to_string(),
             contents: String::new(),
         });
-        assert!(merge_sets_for_repo(&[a, b]).is_err());
+        assert!(matches!(
+            merge_sets_for_repo(&[a, b]),
+            Err(MergeError::TemplateConflict(_))
+        ));
     }
 }

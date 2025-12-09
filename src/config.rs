@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
+use crate::error::{Error, Result};
 use crate::sets::LabelSpec;
+use crate::util::{SUPPORTED_EXTS, parse_by_extension};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OrgDefaults {
@@ -19,28 +20,33 @@ pub struct RepoConfig {
     pub sets: Vec<String>,
 }
 
+/// Root configuration read from `gh-governor-conf.{toml,yml,yaml,json}`.
 #[derive(Debug, Deserialize, Clone)]
 pub struct RootConfig {
+    /// GitHub organization to operate on.
     pub org: String,
+    /// Sets applied to every repository unless overridden.
     #[serde(default)]
     pub default_sets: Vec<String>,
+    /// Repositories and their per-repo set ordering.
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
+    /// Optional directory for configuration sets (relative to base); defaults to `config-sets/`.
     #[serde(default)]
     pub config_sets_dir: Option<String>,
+    /// Environment variable name for the GitHub token; falls back to standard defaults if omitted.
     #[serde(default)]
     pub token_env_var: Option<String>,
+    /// Defaults applied at the organization level (e.g., default labels).
     #[serde(default)]
     pub org_defaults: Option<OrgDefaults>,
 }
 
 const MAIN_CONFIG_BASENAME: &str = "gh-governor-conf";
-const SUPPORTED_EXTS: &[&str] = &["toml", "yml", "yaml", "json"];
 
 pub fn load_root_config(base: &Path) -> Result<(RootConfig, PathBuf)> {
     let path = find_main_config(base)?;
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read config file {}", path.display()))?;
+    let contents = fs::read_to_string(&path).map_err(|e| Error::io_with_path(e, path.clone()))?;
     let cfg = parse_by_extension(&path, &contents)?;
     Ok((cfg, path))
 }
@@ -59,22 +65,7 @@ fn find_main_config(base: &Path) -> Result<PathBuf> {
             return Ok(candidate);
         }
     }
-    Err(anyhow!(
-        "no main config file found at {} (looked for {}.{{toml,yml,yaml,json}})",
-        base.display(),
-        MAIN_CONFIG_BASENAME
-    ))
-}
-
-fn parse_by_extension<T: for<'de> Deserialize<'de>>(path: &Path, contents: &str) -> Result<T> {
-    match path
-        .extension()
-        .and_then(|os| os.to_str())
-        .unwrap_or_default()
-    {
-        "toml" => toml::from_str(contents).context("parsing toml config"),
-        "yml" | "yaml" => serde_yaml::from_str(contents).context("parsing yaml config"),
-        "json" => serde_json::from_str(contents).context("parsing json config"),
-        other => Err(anyhow!("unsupported config extension: {other}")),
-    }
+    Err(Error::MissingConfig {
+        base: base.to_path_buf(),
+    })
 }

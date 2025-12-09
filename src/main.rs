@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::{error, info};
 
 use gh_governor::config::{load_root_config, resolve_sets_dir};
+use gh_governor::error::Result;
 use gh_governor::merge::merge_sets_for_repo;
 use gh_governor::sets::SetDefinition;
 
@@ -46,15 +46,17 @@ fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
         Command::Plan { repos } => run_plan(args.config_base, repos),
-        Command::Apply { repos } => {
-            run_plan(args.config_base, repos).context("apply not yet implemented; showing plan instead")
-        }
+        Command::Apply { repos } => run_plan(args.config_base, repos),
     }
 }
 
 fn run_plan(config_base: PathBuf, only_repos: Vec<String>) -> Result<()> {
     let (root, root_path) = load_root_config(&config_base)?;
-    info!("loaded config for org '{}' from {}", root.org, root_path.display());
+    info!(
+        "loaded config for org '{}' from {}",
+        root.org,
+        root_path.display()
+    );
 
     let sets_dir = resolve_sets_dir(&config_base, &root);
     let mut set_cache: HashMap<String, SetDefinition> = HashMap::new();
@@ -65,14 +67,9 @@ fn run_plan(config_base: PathBuf, only_repos: Vec<String>) -> Result<()> {
         }
 
         let mut set_defs = Vec::new();
-        for set_name in root
-            .default_sets
-            .iter()
-            .chain(repo.sets.iter())
-        {
+        for set_name in root.default_sets.iter().chain(repo.sets.iter()) {
             if !set_cache.contains_key(set_name) {
-                let loaded = gh_governor::sets::load_set(&sets_dir, set_name)
-                    .with_context(|| format!("loading set '{set_name}' for repo {}", repo.name))?;
+                let loaded = gh_governor::sets::load_set(&sets_dir, set_name)?;
                 set_cache.insert(set_name.clone(), loaded);
             }
             let cached = set_cache

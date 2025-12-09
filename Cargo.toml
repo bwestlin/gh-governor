@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.95"
+clap = { version = "4.5.20", features = ["derive"] }
+glob = "0.3.1"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.135"
+serde_yaml = "0.9.34"
+tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread"] }
+toml = "0.8.19"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
+octocrab = "0.40.0"
+reqwest = { version = "0.12.8", features = ["json", "rustls-tls"] }

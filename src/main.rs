@@ -16,6 +16,15 @@ struct Args {
     #[arg(long, default_value = ".")]
     config_base: PathBuf,
 
+    /// GitHub token (or set env GITHUB_TOKEN)
+    #[arg(
+        long,
+        env = "GITHUB_TOKEN",
+        value_name = "TOKEN",
+        hide_env_values = true
+    )]
+    token: String,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -45,12 +54,12 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     match args.command {
-        Command::Plan { repos } => run_plan(args.config_base, repos),
-        Command::Apply { repos } => run_plan(args.config_base, repos),
+        Command::Plan { repos } => run_plan(args.config_base, repos, args.token),
+        Command::Apply { repos } => run_plan(args.config_base, repos, args.token),
     }
 }
 
-fn run_plan(config_base: PathBuf, only_repos: Vec<String>) -> Result<()> {
+fn run_plan(config_base: PathBuf, only_repos: Vec<String>, _token: String) -> Result<()> {
     let (root, root_path) = load_root_config(&config_base)?;
     info!(
         "loaded config for org '{}' from {}",

@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
-use crate::sets::LabelSpec;
+use crate::sets::{LabelSpec, deserialize_label_map};
 use crate::util::{SUPPORTED_EXTS, parse_by_extension};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OrgDefaults {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_label_map")]
     pub labels: Vec<LabelSpec>,
 }
 
@@ -34,9 +34,6 @@ pub struct RootConfig {
     /// Optional directory for configuration sets (relative to base); defaults to `config-sets/`.
     #[serde(default)]
     pub config_sets_dir: Option<String>,
-    /// Environment variable name for the GitHub token; falls back to standard defaults if omitted.
-    #[serde(default)]
-    pub token_env_var: Option<String>,
     /// Defaults applied at the organization level (e.g., default labels).
     #[serde(default)]
     pub org_defaults: Option<OrgDefaults>,

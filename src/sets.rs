@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -61,13 +62,41 @@ pub struct SetDefinition {
     pub checks: Option<ChecksConfig>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct LabelFields {
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+pub fn deserialize_label_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<LabelSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let map: HashMap<String, LabelFields> = HashMap::deserialize(deserializer)?;
+    Ok(labels_from_map(map))
+}
+
+fn labels_from_map(map: HashMap<String, LabelFields>) -> Vec<LabelSpec> {
+    map.into_iter()
+        .map(|(name, fields)| LabelSpec {
+            name,
+            color: fields.color,
+            description: fields.description,
+        })
+        .collect()
+}
+
 pub fn load_set(base_dir: &Path, name: &str) -> Result<SetDefinition> {
     let path = base_dir.join(name);
     if !path.is_dir() {
         return Err(Error::MissingConfig { base: path });
     }
 
-    let labels = load_named_file::<Vec<LabelSpec>>(&path, "labels")?.unwrap_or_default();
+    let labels = load_labels_file(&path)?.unwrap_or_default();
     let repo_settings = load_named_file::<RepoSettings>(&path, "repo-settings")?;
     let branch_protection = load_named_file::<BranchProtectionConfig>(&path, "branch-protection")?;
     let checks = load_named_file::<ChecksConfig>(&path, "checks")?;
@@ -105,6 +134,19 @@ fn load_issue_templates(set_path: &Path) -> Result<Vec<IssueTemplateFile>> {
         }
     }
     Ok(templates)
+}
+
+fn load_labels_file(dir: &Path) -> Result<Option<Vec<LabelSpec>>> {
+    for ext in SUPPORTED_EXTS {
+        let candidate = dir.join(format!("labels.{ext}"));
+        if candidate.exists() {
+            let contents = fs::read_to_string(&candidate)
+                .map_err(|e| Error::io_with_path(e, candidate.clone()))?;
+            let map: HashMap<String, LabelFields> = parse_by_extension(&candidate, &contents)?;
+            return Ok(Some(labels_from_map(map)));
+        }
+    }
+    Ok(None)
 }
 
 fn load_named_file<T: for<'de> Deserialize<'de>>(dir: &Path, stem: &str) -> Result<Option<T>> {

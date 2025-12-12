@@ -435,6 +435,7 @@ dependencies = [
  "clap",
  "glob",
  "octocrab",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

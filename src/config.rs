@@ -4,14 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
-use crate::sets::{LabelSpec, deserialize_label_map};
 use crate::util::{SUPPORTED_EXTS, parse_by_extension};
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct OrgDefaults {
-    #[serde(default, deserialize_with = "deserialize_label_map")]
-    pub labels: Vec<LabelSpec>,
-}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RepoConfig {
@@ -34,9 +27,6 @@ pub struct RootConfig {
     /// Optional directory for configuration sets (relative to base); defaults to `config-sets/`.
     #[serde(default)]
     pub config_sets_dir: Option<String>,
-    /// Defaults applied at the organization level (e.g., default labels).
-    #[serde(default)]
-    pub org_defaults: Option<OrgDefaults>,
 }
 
 const MAIN_CONFIG_BASENAME: &str = "gh-governor-conf";

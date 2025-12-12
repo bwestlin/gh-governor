@@ -67,7 +67,11 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
     }
 
     Ok(MergedRepoConfig {
-        labels: labels.into_values().collect(),
+        labels: {
+            let mut v: Vec<_> = labels.into_values().collect();
+            v.sort_by(|a, b| a.name.cmp(&b.name));
+            v
+        },
         issue_templates: templates.into_values().collect(),
         repo_settings,
         branch_protection,

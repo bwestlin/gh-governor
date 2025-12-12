@@ -4,10 +4,12 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use tracing::{error, info};
 
-use gh_governor::config::{load_root_config, resolve_sets_dir};
+use gh_governor::config::{RootConfig, load_root_config, resolve_sets_dir};
+use gh_governor::diff::diff_labels;
 use gh_governor::error::Result;
-use gh_governor::merge::merge_sets_for_repo;
-use gh_governor::sets::SetDefinition;
+use gh_governor::github::{GithubClient, LabelUsageEntry};
+use gh_governor::merge::{MergedRepoConfig, merge_sets_for_repo};
+use gh_governor::sets::{LabelSpec, SetDefinition};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -24,6 +26,10 @@ struct Args {
         hide_env_values = true
     )]
     token: String,
+
+    /// Show extra details for blocked label removals
+    #[arg(long, short = 'v')]
+    verbose: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -44,7 +50,8 @@ enum Command {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt()
@@ -53,22 +60,186 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    match args.command {
-        Command::Plan { repos } => run_plan(args.config_base, repos, args.token),
-        Command::Apply { repos } => run_plan(args.config_base, repos, args.token),
-    }
+    let (mode, only_repos) = match args.command {
+        Command::Plan { repos } => (Mode::Plan, repos),
+        Command::Apply { repos } => (Mode::Apply, repos),
+    };
+    let (root, root_path) = load_root_config(&args.config_base)?;
+    let sets_dir = resolve_sets_dir(&args.config_base, &root);
+    let gh = GithubClient::new(&args.token, root.org.clone())?;
+
+    run(
+        mode,
+        root,
+        root_path,
+        sets_dir,
+        only_repos,
+        gh,
+        args.verbose,
+    )
+    .await
 }
 
-fn run_plan(config_base: PathBuf, only_repos: Vec<String>, _token: String) -> Result<()> {
-    let (root, root_path) = load_root_config(&config_base)?;
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    Plan,
+    Apply,
+}
+
+async fn run(
+    mode: Mode,
+    root: RootConfig,
+    root_path: PathBuf,
+    sets_dir: PathBuf,
+    only_repos: Vec<String>,
+    gh: GithubClient,
+    verbose: bool,
+) -> Result<()> {
+    let merged = prepare_merged(&root, &sets_dir, &only_repos)?;
     info!(
         "loaded config for org '{}' from {}",
         root.org,
         root_path.display()
     );
 
-    let sets_dir = resolve_sets_dir(&config_base, &root);
+    match mode {
+        Mode::Plan => handle_labels(Mode::Plan, &gh, merged, verbose).await?,
+        Mode::Apply => handle_labels(Mode::Apply, &gh, merged, verbose).await?,
+    }
+
+    Ok(())
+}
+
+async fn handle_labels(
+    mode: Mode,
+    gh: &GithubClient,
+    merged: Vec<(String, MergedRepoConfig)>,
+    verbose: bool,
+) -> Result<()> {
+    for (repo_name, merged_cfg) in merged {
+        let current_labels = gh.list_repo_labels(&repo_name).await?;
+        let diff = diff_labels(&merged_cfg.labels, &current_labels);
+
+        let mut blocked_removals: Vec<(LabelSpec, Vec<LabelUsageEntry>)> = Vec::new();
+        let mut removable = Vec::new();
+
+        for label in &diff.to_remove {
+            match gh.label_usage(&repo_name, &label.name, verbose).await? {
+                Some(usage) => blocked_removals.push((label.clone(), usage)),
+                None => removable.push(label.clone()),
+            }
+        }
+
+        match mode {
+            Mode::Plan => {
+                println!(
+                    "Repo {} (plan):\n  Add labels ({}):{}\n  Update labels ({}):{}\n  Remove labels ({}):{}\n  Blocked removals ({}):{}\n  Note: templates/settings apply not yet implemented",
+                    repo_name,
+                    diff.to_add.len(),
+                    format_label_lines(&diff.to_add),
+                    diff.to_update.len(),
+                    format_label_lines(&diff.to_update),
+                    removable.len(),
+                    format_label_lines(&removable),
+                    blocked_removals.len(),
+                    format_blocked_lines(&blocked_removals, verbose),
+                );
+            }
+            Mode::Apply => {
+                for label in &diff.to_add {
+                    gh.create_label(&repo_name, label).await?;
+                }
+                for label in &diff.to_update {
+                    gh.update_label(&repo_name, label).await?;
+                }
+                for label in &removable {
+                    gh.delete_label(&repo_name, &label.name).await?;
+                }
+                if !blocked_removals.is_empty() {
+                    println!(
+                        "Repo {} (apply): skipped removal of labels with issues/PRs:{}",
+                        repo_name,
+                        format_blocked_lines(&blocked_removals, verbose)
+                    );
+                }
+                println!(
+                    "Repo {} (apply):\n  Added labels ({}):{}\n  Updated labels ({}):{}\n  Removed labels ({}):{}\n  Note: templates/settings apply not yet implemented",
+                    repo_name,
+                    diff.to_add.len(),
+                    format_label_lines(&diff.to_add),
+                    diff.to_update.len(),
+                    format_label_lines(&diff.to_update),
+                    diff.to_remove.len() - blocked_removals.len(),
+                    format_label_lines(&removable),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn format_label_lines(labels: &[LabelSpec]) -> String {
+    if labels.is_empty() {
+        return " none".to_string();
+    }
+    let mut out = String::new();
+    for label in labels {
+        let mut line = format!("    - {}", label.name);
+        if let Some(color) = &label.color {
+            line.push_str(&format!(" (#{})", color));
+        }
+        if let Some(desc) = &label.description {
+            line.push_str(&format!(" \"{}\"", desc));
+        }
+        out.push('\n');
+        out.push_str(&line);
+    }
+    out
+}
+
+fn format_blocked_lines(blocked: &[(LabelSpec, Vec<LabelUsageEntry>)], verbose: bool) -> String {
+    if blocked.is_empty() {
+        return " none".to_string();
+    }
+    let mut out = String::new();
+    for (label, usage) in blocked {
+        let mut line = format!("    - {}", label.name);
+        if let Some(color) = &label.color {
+            line.push_str(&format!(" (#{})", color));
+        }
+        if let Some(desc) = &label.description {
+            line.push_str(&format!(" \"{}\"", desc));
+        }
+        if verbose && !usage.is_empty() {
+            line.push_str(" -> in use by:");
+            out.push('\n');
+            out.push_str(&line);
+            for u in usage {
+                let kind = if u.is_pr { "PR" } else { "Issue" };
+                let entry = match (&u.url, u.number) {
+                    (Some(url), n) if n > 0 => format!("{} {} ({})", kind, n, url),
+                    (Some(url), _) => format!("{} ({})", kind, url),
+                    (None, n) if n > 0 => format!("{} {}", kind, n),
+                    _ => kind.to_string(),
+                };
+                out.push('\n');
+                out.push_str(&format!("      - {}", entry));
+            }
+            continue;
+        }
+        out.push('\n');
+        out.push_str(&line);
+    }
+    out
+}
+
+fn prepare_merged(
+    root: &RootConfig,
+    sets_dir: &PathBuf,
+    only_repos: &[String],
+) -> Result<Vec<(String, MergedRepoConfig)>> {
     let mut set_cache: HashMap<String, SetDefinition> = HashMap::new();
+    let mut merged = Vec::new();
 
     for repo in root.repos.iter() {
         if !only_repos.is_empty() && !only_repos.contains(&repo.name) {
@@ -94,28 +265,12 @@ fn run_plan(config_base: PathBuf, only_repos: Vec<String>, _token: String) -> Re
         }
 
         match merge_sets_for_repo(&set_defs) {
-            Ok(merged) => {
-                info!(
-                    "repo '{}': {} labels, {} templates, repo_settings={}, branch_protection={}",
-                    repo.name,
-                    merged.labels.len(),
-                    merged.issue_templates.len(),
-                    merged.repo_settings.is_some(),
-                    merged.branch_protection.is_some()
-                );
-            }
+            Ok(m) => merged.push((repo.name.clone(), m)),
             Err(err) => {
                 error!("repo '{}': merge failed: {err}", repo.name);
             }
         }
     }
 
-    if let Some(defaults) = &root.org_defaults {
-        info!(
-            "org defaults: {} labels defined for new repos",
-            defaults.labels.len()
-        );
-    }
-
-    Ok(())
+    Ok(merged)
 }

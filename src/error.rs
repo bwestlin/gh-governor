@@ -40,6 +40,10 @@ pub enum Error {
     GlobPattern(#[from] glob::PatternError),
     #[error("glob error reading paths: {0}")]
     GlobGlob(#[from] glob::GlobError),
+    #[error("github api error: {0}")]
+    Octo(#[from] octocrab::Error),
+    #[error("repository '{org}/{repo}' not found")]
+    RepoNotFound { org: String, repo: String },
 }
 
 impl Error {

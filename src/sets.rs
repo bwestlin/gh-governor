@@ -81,13 +81,16 @@ where
 }
 
 fn labels_from_map(map: HashMap<String, LabelFields>) -> Vec<LabelSpec> {
-    map.into_iter()
+    let mut labels: Vec<_> = map
+        .into_iter()
         .map(|(name, fields)| LabelSpec {
             name,
             color: fields.color,
             description: fields.description,
         })
-        .collect()
+        .collect();
+    labels.sort_by(|a, b| a.name.cmp(&b.name));
+    labels
 }
 
 pub fn load_set(base_dir: &Path, name: &str) -> Result<SetDefinition> {

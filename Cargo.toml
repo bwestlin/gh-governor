@@ -8,6 +8,7 @@ clap = { version = "4.5.20", features = ["derive", "env"] }
 glob = "0.3.1"
 octocrab = "0.40.0"
 percent-encoding = "2.3.1"
+owo-colors = { version = "4.2.0", features = ["supports-colors"] }
 reqwest = { version = "0.12.8", features = ["json", "rustls-tls"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.135"

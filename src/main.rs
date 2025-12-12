@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use owo_colors::{OwoColorize, Stream};
 use tracing::{error, info};
 
 use gh_governor::config::{RootConfig, load_root_config, resolve_sets_dir};
@@ -133,15 +134,15 @@ async fn handle_labels(
         match mode {
             Mode::Plan => {
                 println!(
-                    "Repo {} (plan):\n  Add labels ({}):{}\n  Update labels ({}):{}\n  Remove labels ({}):{}\n  Blocked removals ({}):{}\n  Note: templates/settings apply not yet implemented",
+                    "Repo {} (plan):\n  Add labels ({}) :{}\n  Update labels ({}) :{}\n  Remove labels ({}) :{}\n  Blocked removals ({}) :{}\n  Note: templates/settings apply not yet implemented",
                     repo_name,
-                    diff.to_add.len(),
-                    format_label_lines(&diff.to_add),
-                    diff.to_update.len(),
-                    format_label_lines(&diff.to_update),
-                    removable.len(),
-                    format_label_lines(&removable),
-                    blocked_removals.len(),
+                    format_count(diff.to_add.len(), ColorKind::Add),
+                    format_label_lines(&diff.to_add, ColorKind::Add),
+                    format_count(diff.to_update.len(), ColorKind::Update),
+                    format_label_lines(&diff.to_update, ColorKind::Update),
+                    format_count(removable.len(), ColorKind::Remove),
+                    format_label_lines(&removable, ColorKind::Remove),
+                    format_count(blocked_removals.len(), ColorKind::Blocked),
                     format_blocked_lines(&blocked_removals, verbose),
                 );
             }
@@ -163,14 +164,17 @@ async fn handle_labels(
                     );
                 }
                 println!(
-                    "Repo {} (apply):\n  Added labels ({}):{}\n  Updated labels ({}):{}\n  Removed labels ({}):{}\n  Note: templates/settings apply not yet implemented",
+                    "Repo {} (apply):\n  Added labels ({}) :{}\n  Updated labels ({}) :{}\n  Removed labels ({}) :{}\n  Note: templates/settings apply not yet implemented",
                     repo_name,
-                    diff.to_add.len(),
-                    format_label_lines(&diff.to_add),
-                    diff.to_update.len(),
-                    format_label_lines(&diff.to_update),
-                    diff.to_remove.len() - blocked_removals.len(),
-                    format_label_lines(&removable),
+                    format_count(diff.to_add.len(), ColorKind::Add),
+                    format_label_lines(&diff.to_add, ColorKind::Add),
+                    format_count(diff.to_update.len(), ColorKind::Update),
+                    format_label_lines(&diff.to_update, ColorKind::Update),
+                    format_count(
+                        diff.to_remove.len() - blocked_removals.len(),
+                        ColorKind::Remove
+                    ),
+                    format_label_lines(&removable, ColorKind::Remove),
                 );
             }
         }
@@ -178,13 +182,38 @@ async fn handle_labels(
     Ok(())
 }
 
-fn format_label_lines(labels: &[LabelSpec]) -> String {
+#[derive(Clone, Copy)]
+enum ColorKind {
+    Add,
+    Update,
+    Remove,
+    Blocked,
+}
+
+fn format_count(count: usize, kind: ColorKind) -> String {
+    if count == 0 {
+        return count.to_string();
+    }
+    apply_color(&count.to_string(), kind)
+}
+
+fn apply_color(text: &str, kind: ColorKind) -> String {
+    text.if_supports_color(Stream::Stdout, |t| match kind {
+        ColorKind::Add => t.green().bold().to_string(),
+        ColorKind::Update => t.cyan().bold().to_string(),
+        ColorKind::Remove => t.red().bold().to_string(),
+        ColorKind::Blocked => t.yellow().bold().to_string(),
+    })
+    .to_string()
+}
+
+fn format_label_lines(labels: &[LabelSpec], kind: ColorKind) -> String {
     if labels.is_empty() {
         return " none".to_string();
     }
     let mut out = String::new();
     for label in labels {
-        let mut line = format!("    - {}", label.name);
+        let mut line = format!("    - {}", apply_color(&label.name, kind));
         if let Some(color) = &label.color {
             line.push_str(&format!(" (#{})", color));
         }
@@ -203,7 +232,7 @@ fn format_blocked_lines(blocked: &[(LabelSpec, Vec<LabelUsageEntry>)], verbose: 
     }
     let mut out = String::new();
     for (label, usage) in blocked {
-        let mut line = format!("    - {}", label.name);
+        let mut line = format!("    - {}", apply_color(&label.name, ColorKind::Blocked));
         if let Some(color) = &label.color {
             line.push_str(&format!(" (#{})", color));
         }

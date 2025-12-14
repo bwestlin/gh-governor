@@ -201,8 +201,8 @@ fn apply_color(text: &str, kind: ColorKind) -> String {
     text.if_supports_color(Stream::Stdout, |t| match kind {
         ColorKind::Add => t.green().bold().to_string(),
         ColorKind::Update => t.cyan().bold().to_string(),
-        ColorKind::Remove => t.red().bold().to_string(),
-        ColorKind::Blocked => t.yellow().bold().to_string(),
+        ColorKind::Remove => t.magenta().bold().to_string(),
+        ColorKind::Blocked => t.red().bold().to_string(),
     })
     .to_string()
 }

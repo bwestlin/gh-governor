@@ -7,6 +7,11 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{Error, Result};
 use crate::sets::LabelSpec;
+use crate::settings::{
+    BranchProtectionRule, BranchRestrictions, PullRequestSettings, RepoSettings,
+    RequiredPullRequestReviews, RequiredStatusChecks, ReviewDismissalRestrictions, StatusCheck,
+};
+use tracing::warn;
 
 #[derive(Clone)]
 pub struct GithubClient {
@@ -146,6 +151,139 @@ impl GithubClient {
             Ok(Some(entries))
         }
     }
+
+    pub async fn get_repo_settings(&self, repo: &str) -> Result<RepoSettings> {
+        let repo_model = self
+            .inner
+            .repos(&self.org, repo)
+            .get()
+            .await
+            .map_err(|e| map_repo_error(&self.org, repo, e))?;
+
+        Ok(RepoSettings {
+            pull_requests: Some(PullRequestSettings {
+                allow_merge_commit: repo_model.allow_merge_commit,
+                allow_squash_merge: repo_model.allow_squash_merge,
+                allow_rebase_merge: repo_model.allow_rebase_merge,
+                allow_auto_merge: repo_model.allow_auto_merge,
+                delete_branch_on_merge: repo_model.delete_branch_on_merge,
+            }),
+        })
+    }
+
+    pub async fn update_repo_settings(&self, repo: &str, settings: &RepoSettings) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            allow_merge_commit: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            allow_squash_merge: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            allow_rebase_merge: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            allow_auto_merge: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            delete_branch_on_merge: Option<bool>,
+        }
+
+        let body = Body {
+            allow_merge_commit: settings
+                .pull_requests
+                .as_ref()
+                .and_then(|p| p.allow_merge_commit),
+            allow_squash_merge: settings
+                .pull_requests
+                .as_ref()
+                .and_then(|p| p.allow_squash_merge),
+            allow_rebase_merge: settings
+                .pull_requests
+                .as_ref()
+                .and_then(|p| p.allow_rebase_merge),
+            allow_auto_merge: settings
+                .pull_requests
+                .as_ref()
+                .and_then(|p| p.allow_auto_merge),
+            delete_branch_on_merge: settings
+                .pull_requests
+                .as_ref()
+                .and_then(|p| p.delete_branch_on_merge),
+        };
+
+        // Only send an update if at least one field is present.
+        if serde_json::to_value(&body)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .map(|m| m.is_empty())
+            .unwrap_or(true)
+        {
+            return Ok(());
+        }
+
+        self.inner
+            ._patch(format!("/repos/{}/{}", self.org, repo), Some(&body))
+            .await
+            .map_err(|e| map_repo_error(&self.org, repo, e))?;
+
+        Ok(())
+    }
+
+    pub async fn get_branch_protection(
+        &self,
+        repo: &str,
+        pattern: &str,
+    ) -> Result<Option<BranchProtectionRule>> {
+        let path = format!(
+            "/repos/{}/{}/branches/{}/protection",
+            self.org, repo, pattern
+        );
+        match self
+            .inner
+            .get::<BranchProtectionResponse, _, ()>(path, None)
+            .await
+        {
+            Ok(data) => Ok(Some(map_branch_protection_response(pattern, data))),
+            Err(octocrab::Error::GitHub { ref source, .. })
+                if source.status_code == reqwest::StatusCode::NOT_FOUND =>
+            {
+                Ok(None)
+            }
+            Err(octocrab::Error::GitHub { ref source, .. })
+                if source.status_code == reqwest::StatusCode::FORBIDDEN =>
+            {
+                warn!(
+                    "branch protection not available for {}/{}: {}",
+                    self.org, repo, source.message
+                );
+                Ok(None)
+            }
+            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+        }
+    }
+
+    pub async fn set_branch_protection(
+        &self,
+        repo: &str,
+        rule: &BranchProtectionRule,
+    ) -> Result<()> {
+        let path = format!(
+            "/repos/{}/{}/branches/{}/protection",
+            self.org, repo, rule.pattern
+        );
+        let body = BranchProtectionRequest::from_rule(rule);
+        match self.inner._put(path, Some(&body)).await {
+            Ok(_) => Ok(()),
+            Err(octocrab::Error::GitHub { ref source, .. })
+                if source.status_code == reqwest::StatusCode::FORBIDDEN =>
+            {
+                warn!(
+                    "branch protection not available for {}/{}: {}",
+                    self.org, repo, source.message
+                );
+                Ok(())
+            }
+            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+        }
+    }
 }
 
 fn normalize_color(color: &Option<String>) -> String {
@@ -198,4 +336,261 @@ fn collect_issue_refs(issues: &[Issue]) -> Vec<LabelUsageEntry> {
             is_pr: issue.pull_request.is_some(),
         })
         .collect()
+}
+
+#[derive(serde::Deserialize)]
+struct BranchProtectionResponse {
+    required_status_checks: Option<RequiredStatusChecksResponse>,
+    enforce_admins: Option<EnforceAdmins>,
+    required_pull_request_reviews: Option<RequiredPullRequestReviewsResponse>,
+    restrictions: Option<BranchRestrictionsResponse>,
+    allow_force_pushes: Option<EnabledFlag>,
+    allow_deletions: Option<EnabledFlag>,
+    block_creations: Option<EnabledFlag>,
+    required_linear_history: Option<EnabledFlag>,
+    required_conversation_resolution: Option<EnabledFlag>,
+    required_signatures: Option<EnabledFlag>,
+}
+
+#[derive(serde::Deserialize)]
+struct RequiredStatusChecksResponse {
+    strict: Option<bool>,
+    contexts: Option<Vec<String>>,
+    checks: Option<Vec<StatusCheckResponse>>,
+}
+
+#[derive(serde::Deserialize)]
+struct StatusCheckResponse {
+    context: String,
+    app_id: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct EnforceAdmins {
+    enabled: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+struct RequiredPullRequestReviewsResponse {
+    dismiss_stale_reviews: Option<bool>,
+    require_code_owner_reviews: Option<bool>,
+    required_approving_review_count: Option<u8>,
+    require_last_push_approval: Option<bool>,
+    dismissal_restrictions: Option<ReviewDismissalRestrictionsResponse>,
+}
+
+#[derive(serde::Deserialize)]
+struct ReviewDismissalRestrictionsResponse {
+    users: Option<Vec<SimpleActor>>,
+    teams: Option<Vec<SimpleActor>>,
+}
+
+#[derive(serde::Deserialize)]
+struct BranchRestrictionsResponse {
+    users: Option<Vec<SimpleActor>>,
+    teams: Option<Vec<SimpleActor>>,
+    apps: Option<Vec<SimpleActor>>,
+}
+
+#[derive(serde::Deserialize)]
+struct SimpleActor {
+    login: Option<String>,
+    slug: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct EnabledFlag {
+    enabled: Option<bool>,
+}
+
+fn map_branch_protection_response(
+    pattern: &str,
+    resp: BranchProtectionResponse,
+) -> BranchProtectionRule {
+    BranchProtectionRule {
+        pattern: pattern.to_string(),
+        required_status_checks: resp.required_status_checks.map(|c| RequiredStatusChecks {
+            strict: c.strict,
+            contexts: c.contexts,
+            checks: c.checks.map(|v| {
+                v.into_iter()
+                    .map(|c| StatusCheck {
+                        context: c.context,
+                        app_id: c.app_id,
+                    })
+                    .collect()
+            }),
+        }),
+        required_pull_request_reviews: resp.required_pull_request_reviews.map(|r| {
+            RequiredPullRequestReviews {
+                dismiss_stale_reviews: r.dismiss_stale_reviews,
+                require_code_owner_reviews: r.require_code_owner_reviews,
+                required_approving_review_count: r.required_approving_review_count,
+                require_last_push_approval: r.require_last_push_approval,
+                dismissal_restrictions: r.dismissal_restrictions.map(|d| {
+                    ReviewDismissalRestrictions {
+                        users: d
+                            .users
+                            .map(|u| u.into_iter().filter_map(|v| v.login.or(v.slug)).collect()),
+                        teams: d
+                            .teams
+                            .map(|t| t.into_iter().filter_map(|v| v.slug.or(v.login)).collect()),
+                    }
+                }),
+            }
+        }),
+        enforce_admins: resp.enforce_admins.and_then(|e| e.enabled),
+        restrictions: resp.restrictions.map(|r| BranchRestrictions {
+            users: r
+                .users
+                .map(|u| u.into_iter().filter_map(|v| v.login.or(v.slug)).collect()),
+            teams: r
+                .teams
+                .map(|t| t.into_iter().filter_map(|v| v.slug.or(v.login)).collect()),
+            apps: r
+                .apps
+                .map(|a| a.into_iter().filter_map(|v| v.slug.or(v.login)).collect()),
+        }),
+        allow_force_pushes: resp.allow_force_pushes.and_then(|f| f.enabled),
+        allow_deletions: resp.allow_deletions.and_then(|f| f.enabled),
+        block_creations: resp.block_creations.and_then(|f| f.enabled),
+        require_linear_history: resp.required_linear_history.and_then(|f| f.enabled),
+        required_conversation_resolution: resp
+            .required_conversation_resolution
+            .and_then(|f| f.enabled),
+        required_signatures: resp.required_signatures.and_then(|f| f.enabled),
+    }
+}
+
+#[derive(serde::Serialize)]
+struct BranchProtectionRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_status_checks: Option<RequiredStatusChecksRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enforce_admins: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_pull_request_reviews: Option<RequiredPullRequestReviewsRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restrictions: Option<BranchRestrictionsRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_force_pushes: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_deletions: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_creations: Option<bool>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "required_linear_history"
+    )]
+    require_linear_history: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_conversation_resolution: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_signatures: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+struct RequiredStatusChecksRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contexts: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checks: Option<Vec<StatusCheckRequest>>,
+}
+
+#[derive(serde::Serialize)]
+struct StatusCheckRequest {
+    context: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_id: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct RequiredPullRequestReviewsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dismiss_stale_reviews: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    require_code_owner_reviews: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_approving_review_count: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    require_last_push_approval: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dismissal_restrictions: Option<ReviewDismissalRestrictionsRequest>,
+}
+
+#[derive(serde::Serialize)]
+struct ReviewDismissalRestrictionsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    users: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    teams: Option<Vec<String>>,
+}
+
+#[derive(serde::Serialize)]
+struct BranchRestrictionsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    users: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    teams: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apps: Option<Vec<String>>,
+}
+
+impl BranchProtectionRequest {
+    fn from_rule(rule: &BranchProtectionRule) -> Self {
+        BranchProtectionRequest {
+            required_status_checks: rule.required_status_checks.as_ref().map(|c| {
+                RequiredStatusChecksRequest {
+                    strict: c.strict,
+                    contexts: c.contexts.clone(),
+                    checks: c.checks.as_ref().map(|v| {
+                        v.iter()
+                            .map(|c| StatusCheckRequest {
+                                context: c.context.clone(),
+                                app_id: c.app_id,
+                            })
+                            .collect()
+                    }),
+                }
+            }),
+            enforce_admins: rule.enforce_admins,
+            required_pull_request_reviews: rule.required_pull_request_reviews.as_ref().map(|r| {
+                RequiredPullRequestReviewsRequest {
+                    dismiss_stale_reviews: r.dismiss_stale_reviews,
+                    require_code_owner_reviews: r.require_code_owner_reviews,
+                    required_approving_review_count: r.required_approving_review_count,
+                    require_last_push_approval: r.require_last_push_approval,
+                    dismissal_restrictions: map_review_dismissals(r),
+                }
+            }),
+            restrictions: rule
+                .restrictions
+                .as_ref()
+                .map(|r| BranchRestrictionsRequest {
+                    users: r.users.clone(),
+                    teams: r.teams.clone(),
+                    apps: r.apps.clone(),
+                }),
+            allow_force_pushes: rule.allow_force_pushes,
+            allow_deletions: rule.allow_deletions,
+            block_creations: rule.block_creations,
+            require_linear_history: rule.require_linear_history,
+            required_conversation_resolution: rule.required_conversation_resolution,
+            required_signatures: rule.required_signatures,
+        }
+    }
+}
+
+fn map_review_dismissals(
+    reviews: &RequiredPullRequestReviews,
+) -> Option<ReviewDismissalRestrictionsRequest> {
+    reviews
+        .dismissal_restrictions
+        .as_ref()
+        .map(|d| ReviewDismissalRestrictionsRequest {
+            users: d.users.clone(),
+            teams: d.teams.clone(),
+        })
 }

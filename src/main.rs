@@ -6,11 +6,12 @@ use owo_colors::{OwoColorize, Stream};
 use tracing::{error, info};
 
 use gh_governor::config::{RootConfig, load_root_config, resolve_sets_dir};
-use gh_governor::diff::diff_labels;
+use gh_governor::diff::{RepoSettingsDiff, diff_labels, diff_repo_settings};
 use gh_governor::error::Result;
 use gh_governor::github::{GithubClient, LabelUsageEntry};
 use gh_governor::merge::{MergedRepoConfig, merge_sets_for_repo};
 use gh_governor::sets::{LabelSpec, SetDefinition};
+use gh_governor::settings::BranchProtectionRule;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -104,20 +105,46 @@ async fn run(
     );
 
     match mode {
-        Mode::Plan => handle_labels(Mode::Plan, &gh, merged, verbose).await?,
-        Mode::Apply => handle_labels(Mode::Apply, &gh, merged, verbose).await?,
+        Mode::Plan => handle_repos(Mode::Plan, &gh, merged, verbose).await?,
+        Mode::Apply => handle_repos(Mode::Apply, &gh, merged, verbose).await?,
     }
 
     Ok(())
 }
 
-async fn handle_labels(
+async fn handle_repos(
     mode: Mode,
     gh: &GithubClient,
     merged: Vec<(String, MergedRepoConfig)>,
     verbose: bool,
 ) -> Result<()> {
     for (repo_name, merged_cfg) in merged {
+        let (settings_diff, desired_settings) = if let Some(desired) = &merged_cfg.repo_settings {
+            let current = gh.get_repo_settings(&repo_name).await?;
+            (Some(diff_repo_settings(desired, &current)), Some(desired))
+        } else {
+            (None, None)
+        };
+
+        let mut bp_changes: Vec<BranchProtectionChange> = Vec::new();
+        if let Some(bp_cfg) = &merged_cfg.branch_protection {
+            for rule in &bp_cfg.rules {
+                let current = gh.get_branch_protection(&repo_name, &rule.pattern).await?;
+                let target = merge_branch_rule(rule, current.as_ref());
+                if current.as_ref() != Some(&target) {
+                    bp_changes.push(BranchProtectionChange {
+                        pattern: rule.pattern.clone(),
+                        action: if current.is_some() {
+                            ChangeAction::Update
+                        } else {
+                            ChangeAction::Create
+                        },
+                        target,
+                    });
+                }
+            }
+        }
+
         let current_labels = gh.list_repo_labels(&repo_name).await?;
         let diff = diff_labels(&merged_cfg.labels, &current_labels);
 
@@ -133,9 +160,15 @@ async fn handle_labels(
 
         match mode {
             Mode::Plan => {
+                let (settings_count, settings_lines) = format_repo_settings(settings_diff.as_ref());
+                let (bp_count, bp_lines) = format_branch_protection(&bp_changes, verbose);
                 println!(
-                    "Repo {} (plan):\n  Add labels ({}) :{}\n  Update labels ({}) :{}\n  Remove labels ({}) :{}\n  Blocked removals ({}) :{}\n  Note: templates/settings apply not yet implemented",
+                    "Repo {} (plan):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  Add labels ({}) :{}\n  Update labels ({}) :{}\n  Remove labels ({}) :{}\n  Blocked removals ({}) :{}\n  Note: templates apply not yet implemented",
                     repo_name,
+                    settings_count,
+                    settings_lines,
+                    bp_count,
+                    bp_lines,
                     format_count(diff.to_add.len(), ColorKind::Add),
                     format_label_lines(&diff.to_add, ColorKind::Add),
                     format_count(diff.to_update.len(), ColorKind::Update),
@@ -147,6 +180,16 @@ async fn handle_labels(
                 );
             }
             Mode::Apply => {
+                if let (Some(diff_settings), Some(desired)) = (&settings_diff, desired_settings) {
+                    if !diff_settings.changes.is_empty() {
+                        gh.update_repo_settings(&repo_name, desired).await?;
+                    }
+                }
+
+                for bp in &bp_changes {
+                    gh.set_branch_protection(&repo_name, &bp.target).await?;
+                }
+
                 for label in &diff.to_add {
                     gh.create_label(&repo_name, label).await?;
                 }
@@ -163,9 +206,15 @@ async fn handle_labels(
                         format_blocked_lines(&blocked_removals, verbose)
                     );
                 }
+                let (settings_count, settings_lines) = format_repo_settings(settings_diff.as_ref());
+                let (bp_count, bp_lines) = format_branch_protection(&bp_changes, verbose);
                 println!(
-                    "Repo {} (apply):\n  Added labels ({}) :{}\n  Updated labels ({}) :{}\n  Removed labels ({}) :{}\n  Note: templates/settings apply not yet implemented",
+                    "Repo {} (apply):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  Added labels ({}) :{}\n  Updated labels ({}) :{}\n  Removed labels ({}) :{}\n  Note: templates apply not yet implemented",
                     repo_name,
+                    settings_count,
+                    settings_lines,
+                    bp_count,
+                    bp_lines,
                     format_count(diff.to_add.len(), ColorKind::Add),
                     format_label_lines(&diff.to_add, ColorKind::Add),
                     format_count(diff.to_update.len(), ColorKind::Update),
@@ -188,6 +237,19 @@ enum ColorKind {
     Update,
     Remove,
     Blocked,
+}
+
+#[derive(Clone)]
+struct BranchProtectionChange {
+    pattern: String,
+    action: ChangeAction,
+    target: BranchProtectionRule,
+}
+
+#[derive(Clone, Copy)]
+enum ChangeAction {
+    Create,
+    Update,
 }
 
 fn format_count(count: usize, kind: ColorKind) -> String {
@@ -260,6 +322,193 @@ fn format_blocked_lines(blocked: &[(LabelSpec, Vec<LabelUsageEntry>)], verbose: 
         out.push_str(&line);
     }
     out
+}
+
+fn format_repo_settings(diff: Option<&RepoSettingsDiff>) -> (String, String) {
+    match diff {
+        None => ("not configured".to_string(), " not configured".to_string()),
+        Some(d) if d.changes.is_empty() => ("0".to_string(), " none".to_string()),
+        Some(d) => {
+            let mut out = String::new();
+            for change in &d.changes {
+                let line = format!(
+                    "    - {}: {} -> {}",
+                    change.field,
+                    change
+                        .current
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "unset".to_string()),
+                    apply_color(&change.desired.to_string(), ColorKind::Update)
+                );
+                out.push('\n');
+                out.push_str(&line);
+            }
+            (format_count(d.changes.len(), ColorKind::Update), out)
+        }
+    }
+}
+
+fn format_branch_protection(changes: &[BranchProtectionChange], verbose: bool) -> (String, String) {
+    if changes.is_empty() {
+        return ("0".to_string(), " none".to_string());
+    }
+    let mut out = String::new();
+    for change in changes {
+        let action = match change.action {
+            ChangeAction::Create => "create",
+            ChangeAction::Update => "update",
+        };
+        out.push('\n');
+        out.push_str(&format!(
+            "    - {}: {}",
+            apply_color(&change.pattern, ColorKind::Update),
+            action
+        ));
+        if verbose {
+            for detail in branch_rule_details(&change.target) {
+                out.push('\n');
+                out.push_str(&format!("      - {}", detail));
+            }
+        }
+    }
+    (format_count(changes.len(), ColorKind::Update), out)
+}
+
+fn merge_branch_rule(
+    desired: &BranchProtectionRule,
+    current: Option<&BranchProtectionRule>,
+) -> BranchProtectionRule {
+    let mut merged = desired.clone();
+    if let Some(cur) = current {
+        if merged.required_status_checks.is_none() {
+            merged.required_status_checks = cur.required_status_checks.clone();
+        }
+        if merged.required_pull_request_reviews.is_none() {
+            merged.required_pull_request_reviews = cur.required_pull_request_reviews.clone();
+        }
+        if merged.enforce_admins.is_none() {
+            merged.enforce_admins = cur.enforce_admins;
+        }
+        if merged.restrictions.is_none() {
+            merged.restrictions = cur.restrictions.clone();
+        }
+        if merged.allow_force_pushes.is_none() {
+            merged.allow_force_pushes = cur.allow_force_pushes;
+        }
+        if merged.allow_deletions.is_none() {
+            merged.allow_deletions = cur.allow_deletions;
+        }
+        if merged.block_creations.is_none() {
+            merged.block_creations = cur.block_creations;
+        }
+        if merged.require_linear_history.is_none() {
+            merged.require_linear_history = cur.require_linear_history;
+        }
+        if merged.required_conversation_resolution.is_none() {
+            merged.required_conversation_resolution = cur.required_conversation_resolution;
+        }
+        if merged.required_signatures.is_none() {
+            merged.required_signatures = cur.required_signatures;
+        }
+    }
+    merged
+}
+
+fn branch_rule_details(rule: &BranchProtectionRule) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(sc) = &rule.required_status_checks {
+        if let Some(strict) = sc.strict {
+            lines.push(format!("status checks strict: {}", strict));
+        }
+        if let Some(ctx) = &sc.contexts {
+            if !ctx.is_empty() {
+                lines.push(format!("status contexts: {}", ctx.join(", ")));
+            }
+        }
+        if let Some(checks) = &sc.checks {
+            if !checks.is_empty() {
+                let list: Vec<String> = checks
+                    .iter()
+                    .map(|c| {
+                        if let Some(app) = c.app_id {
+                            format!("{} (app {})", c.context, app)
+                        } else {
+                            c.context.clone()
+                        }
+                    })
+                    .collect();
+                lines.push(format!("status checks: {}", list.join(", ")));
+            }
+        }
+    }
+    if let Some(pr) = &rule.required_pull_request_reviews {
+        if let Some(v) = pr.dismiss_stale_reviews {
+            lines.push(format!("dismiss stale reviews: {}", v));
+        }
+        if let Some(v) = pr.require_code_owner_reviews {
+            lines.push(format!("require code owner reviews: {}", v));
+        }
+        if let Some(v) = pr.required_approving_review_count {
+            lines.push(format!("required approvals: {}", v));
+        }
+        if let Some(v) = pr.require_last_push_approval {
+            lines.push(format!("require last push approval: {}", v));
+        }
+        if let Some(d) = &pr.dismissal_restrictions {
+            let users = d.users.as_ref().map(|u| u.join(", ")).unwrap_or_default();
+            let teams = d.teams.as_ref().map(|t| t.join(", ")).unwrap_or_default();
+            let mut parts = Vec::new();
+            if !users.is_empty() {
+                parts.push(format!("users [{}]", users));
+            }
+            if !teams.is_empty() {
+                parts.push(format!("teams [{}]", teams));
+            }
+            if !parts.is_empty() {
+                lines.push(format!("dismissal restrictions: {}", parts.join("; ")));
+            }
+        }
+    }
+    if let Some(v) = rule.enforce_admins {
+        lines.push(format!("enforce admins: {}", v));
+    }
+    if let Some(v) = rule.allow_force_pushes {
+        lines.push(format!("allow force pushes: {}", v));
+    }
+    if let Some(v) = rule.allow_deletions {
+        lines.push(format!("allow deletions: {}", v));
+    }
+    if let Some(v) = rule.block_creations {
+        lines.push(format!("block creations: {}", v));
+    }
+    if let Some(v) = rule.require_linear_history {
+        lines.push(format!("require linear history: {}", v));
+    }
+    if let Some(v) = rule.required_conversation_resolution {
+        lines.push(format!("require conversation resolution: {}", v));
+    }
+    if let Some(v) = rule.required_signatures {
+        lines.push(format!("require signatures: {}", v));
+    }
+    if let Some(r) = &rule.restrictions {
+        let users = r.users.as_ref().map(|u| u.join(", ")).unwrap_or_default();
+        let teams = r.teams.as_ref().map(|t| t.join(", ")).unwrap_or_default();
+        let apps = r.apps.as_ref().map(|a| a.join(", ")).unwrap_or_default();
+        let mut parts = Vec::new();
+        if !users.is_empty() {
+            parts.push(format!("users [{}]", users));
+        }
+        if !teams.is_empty() {
+            parts.push(format!("teams [{}]", teams));
+        }
+        if !apps.is_empty() {
+            parts.push(format!("apps [{}]", apps));
+        }
+        if !parts.is_empty() {
+            lines.push(format!("restrictions: {}", parts.join("; ")));
+        }
+    }
+    lines
 }
 
 fn prepare_merged(

@@ -125,11 +125,12 @@ fn load_issue_templates(set_path: &Path) -> Result<Vec<IssueTemplateFile>> {
             let path = entry.map_err(Error::GlobGlob)?;
             let contents =
                 fs::read_to_string(&path).map_err(|e| Error::io_with_path(e, path.clone()))?;
-            let rel = path
-                .strip_prefix(set_path)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
+            let mut rel = path.to_string_lossy().to_string();
+            if let Some(idx) = rel.find(".github/") {
+                rel = rel[idx..].to_string();
+            } else if let Ok(stripped) = path.strip_prefix(set_path) {
+                rel = stripped.to_string_lossy().to_string();
+            }
             templates.push(IssueTemplateFile {
                 path: rel,
                 contents,

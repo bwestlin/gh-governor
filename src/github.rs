@@ -1,10 +1,11 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use octocrab::Octocrab;
-use octocrab::models::{Label, issues::Issue};
+use octocrab::models::{IssueState, Label, issues::Issue, pulls::PullRequest};
 use octocrab::params;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tracing::warn;
 
 use crate::error::{Error, Result};
 use crate::sets::LabelSpec;
@@ -12,7 +13,6 @@ use crate::settings::{
     BranchProtectionRule, BranchRestrictions, PullRequestSettings, RepoSettings,
     RequiredPullRequestReviews, RequiredStatusChecks, ReviewDismissalRestrictions, StatusCheck,
 };
-use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct RepoFile {
@@ -40,6 +40,14 @@ impl GithubClient {
             .build()
             .map_err(Error::Octo)?;
         Ok(Self { inner, org })
+    }
+
+    pub async fn get_repo(&self, repo: &str) -> Result<octocrab::models::Repository> {
+        self.inner
+            .repos(&self.org, repo)
+            .get()
+            .await
+            .map_err(|e| map_repo_error(&self.org, repo, e))
     }
 
     pub async fn list_repo_labels(&self, repo: &str) -> Result<Vec<Label>> {
@@ -160,12 +168,7 @@ impl GithubClient {
     }
 
     pub async fn get_repo_settings(&self, repo: &str) -> Result<RepoSettings> {
-        let repo_model = self
-            .inner
-            .repos(&self.org, repo)
-            .get()
-            .await
-            .map_err(|e| map_repo_error(&self.org, repo, e))?;
+        let repo_model = self.get_repo(repo).await?;
 
         Ok(RepoSettings {
             pull_requests: Some(PullRequestSettings {
@@ -234,7 +237,12 @@ impl GithubClient {
         Ok(())
     }
 
-    pub async fn get_file(&self, repo: &str, path: &str) -> Result<Option<RepoFile>> {
+    pub async fn get_file(
+        &self,
+        repo: &str,
+        path: &str,
+        branch: Option<&str>,
+    ) -> Result<Option<RepoFile>> {
         #[derive(serde::Deserialize)]
         struct ContentFile {
             content: String,
@@ -242,7 +250,10 @@ impl GithubClient {
             encoding: String,
         }
 
-        let route = format!("/repos/{}/{}/contents/{}", self.org, repo, path);
+        let route = match branch {
+            Some(b) => format!("/repos/{}/{}/contents/{}?ref={}", self.org, repo, path, b),
+            None => format!("/repos/{}/{}/contents/{}", self.org, repo, path),
+        };
         match self.inner.get::<ContentFile, _, ()>(route, None).await {
             Ok(file) => {
                 if file.encoding != "base64" {
@@ -280,6 +291,7 @@ impl GithubClient {
         content: &str,
         sha: Option<String>,
         message: &str,
+        branch: Option<&str>,
     ) -> Result<()> {
         #[derive(Serialize)]
         struct Body<'a> {
@@ -287,12 +299,15 @@ impl GithubClient {
             content: String,
             #[serde(skip_serializing_if = "Option::is_none")]
             sha: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            branch: Option<&'a str>,
         }
 
         let body = Body {
             message,
             content: BASE64.encode(content.as_bytes()),
             sha,
+            branch,
         };
         let route = format!("/repos/{}/{}/contents/{}", self.org, repo, path);
         self.inner
@@ -300,6 +315,67 @@ impl GithubClient {
             .await
             .map_err(|e| map_repo_error(&self.org, repo, e))?;
         Ok(())
+    }
+
+    pub async fn delete_file(
+        &self,
+        repo: &str,
+        path: &str,
+        sha: &str,
+        message: &str,
+        branch: Option<&str>,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            message: &'a str,
+            sha: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            branch: Option<&'a str>,
+        }
+        let body = Body {
+            message,
+            sha,
+            branch,
+        };
+        let route = format!("/repos/{}/{}/contents/{}", self.org, repo, path);
+        self.inner
+            ._delete(route, Some(&body))
+            .await
+            .map_err(|e| map_repo_error(&self.org, repo, e))?;
+        Ok(())
+    }
+
+    pub async fn list_github_files(
+        &self,
+        repo: &str,
+        branch: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>> {
+        #[derive(serde::Deserialize)]
+        struct TreeEntry {
+            path: String,
+            #[serde(rename = "type")]
+            entry_type: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct TreeResp {
+            tree: Vec<TreeEntry>,
+        }
+
+        let sha = self.get_branch_sha(repo, branch).await?;
+        let path = format!("/repos/{}/{}/git/trees/{}?recursive=1", self.org, repo, sha);
+        let resp: TreeResp = self
+            .inner
+            .get(path, None::<&()>)
+            .await
+            .map_err(|e| map_repo_error(&self.org, repo, e))?;
+
+        Ok(resp
+            .tree
+            .into_iter()
+            .filter(|e| e.entry_type == "blob" && e.path.starts_with(prefix))
+            .map(|e| e.path)
+            .collect())
     }
 
     pub async fn get_branch_protection(
@@ -356,6 +432,156 @@ impl GithubClient {
                 );
                 Ok(())
             }
+            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+        }
+    }
+
+    pub async fn get_branch_sha(&self, repo: &str, branch: &str) -> Result<String> {
+        #[derive(serde::Deserialize)]
+        struct RefObject {
+            sha: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct RefResp {
+            object: RefObject,
+        }
+
+        let path = format!("/repos/{}/{}/git/ref/heads/{}", self.org, repo, branch);
+        let resp: RefResp = self
+            .inner
+            .get(path, None::<&()>)
+            .await
+            .map_err(|e| map_repo_error(&self.org, repo, e))?;
+        Ok(resp.object.sha)
+    }
+
+    pub async fn create_branch_from(
+        &self,
+        repo: &str,
+        new_branch: &str,
+        base_sha: &str,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            r#ref: &'a str,
+            sha: &'a str,
+        }
+        let body = Body {
+            r#ref: &format!("refs/heads/{new_branch}"),
+            sha: base_sha,
+        };
+        let path = format!("/repos/{}/{}/git/refs", self.org, repo);
+        match self.inner._post(path, Some(&body)).await {
+            Ok(_) => Ok(()),
+            Err(octocrab::Error::GitHub { ref source, .. })
+                if source.status_code == reqwest::StatusCode::UNPROCESSABLE_ENTITY =>
+            {
+                // branch probably exists; treat as success
+                Ok(())
+            }
+            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+        }
+    }
+
+    pub async fn create_pull_request(
+        &self,
+        repo: &str,
+        title: &str,
+        head: &str,
+        base: &str,
+        body: Option<&str>,
+        draft: bool,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            title: &'a str,
+            head: &'a str,
+            base: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            body: Option<&'a str>,
+            draft: bool,
+        }
+        let body = Body {
+            title,
+            head,
+            base,
+            body,
+            draft,
+        };
+        match self
+            .inner
+            ._post(format!("/repos/{}/{}/pulls", self.org, repo), Some(&body))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+        }
+    }
+
+    pub async fn find_open_pr_by_head_prefix(
+        &self,
+        repo: &str,
+        head_prefix: &str,
+        base: &str,
+    ) -> Result<Option<PullRequest>> {
+        let mut page = self
+            .inner
+            .pulls(&self.org, repo)
+            .list()
+            .state(octocrab::params::State::Open)
+            .base(base.to_string())
+            .per_page(50)
+            .send()
+            .await
+            .map_err(|e| map_repo_error(&self.org, repo, e))?;
+
+        loop {
+            if let Some(pr) = page
+                .items
+                .iter()
+                .find(|p| {
+                    p.state == Some(IssueState::Open) && p.head.ref_field.starts_with(head_prefix)
+                })
+                .cloned()
+            {
+                return Ok(Some(pr));
+            }
+            match self
+                .inner
+                .get_page::<PullRequest>(&page.next)
+                .await
+                .map_err(|e| map_repo_error(&self.org, repo, e))?
+            {
+                Some(next) => page = next,
+                None => break,
+            }
+        }
+        Ok(None)
+    }
+
+    pub async fn update_pull_request(
+        &self,
+        repo: &str,
+        number: u64,
+        title: &str,
+        body: Option<&str>,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            title: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            body: Option<&'a str>,
+        }
+        let body = Body { title, body };
+        match self
+            .inner
+            ._patch(
+                format!("/repos/{}/{}/pulls/{}", self.org, repo, number),
+                Some(&body),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
             Err(e) => Err(map_repo_error(&self.org, repo, e)),
         }
     }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use owo_colors::{OwoColorize, Stream};
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,8 @@ enum Mode {
     Apply,
 }
 
+const PR_BRANCH_PREFIX: &str = "gh-governor/updates-";
+
 async fn run(
     mode: Mode,
     root: RootConfig,
@@ -120,12 +123,23 @@ async fn handle_repos(
     verbose: bool,
 ) -> Result<()> {
     for (repo_name, merged_cfg) in merged {
+        let repo_info = gh.get_repo(&repo_name).await?;
+        let base_branch = repo_info
+            .default_branch
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+
         let (settings_diff, desired_settings) = if let Some(desired) = &merged_cfg.repo_settings {
             let current = gh.get_repo_settings(&repo_name).await?;
             (Some(diff_repo_settings(desired, &current)), Some(desired))
         } else {
             (None, None)
         };
+
+        let existing_pr = gh
+            .find_open_pr_by_head_prefix(&repo_name, PR_BRANCH_PREFIX, &base_branch)
+            .await?;
+        let compare_branch = existing_pr.as_ref().map(|pr| pr.head.ref_field.clone());
 
         let mut bp_changes: Vec<BranchProtectionChange> = Vec::new();
         if let Some(bp_cfg) = &merged_cfg.branch_protection {
@@ -159,8 +173,12 @@ async fn handle_repos(
 
         let mut templates_add: Vec<IssueTemplateFile> = Vec::new();
         let mut templates_update: Vec<(IssueTemplateFile, String)> = Vec::new();
+        let mut templates_remove: Vec<(String, String)> = Vec::new(); // (path, sha)
         for tpl in &desired_templates {
-            match gh.get_file(&repo_name, &tpl.path).await? {
+            match gh
+                .get_file(&repo_name, &tpl.path, compare_branch.as_deref())
+                .await?
+            {
                 None => templates_add.push(tpl.clone()),
                 Some(file) if file.content != tpl.contents => {
                     templates_update.push((tpl.clone(), file.sha))
@@ -168,6 +186,29 @@ async fn handle_repos(
                 _ => {}
             }
         }
+        if let Some(branch_ref) = compare_branch.as_deref() {
+            let current_paths = gh
+                .list_github_files(&repo_name, branch_ref, ".github/")
+                .await
+                .unwrap_or_default();
+            for path in current_paths {
+                if path.starts_with(".github/ISSUE_TEMPLATE/")
+                    && !desired_templates
+                        .iter()
+                        .any(|t| short_github_path(&t.path) == path)
+                {
+                    if let Some(file) = gh
+                        .get_file(&repo_name, &path, compare_branch.as_deref())
+                        .await?
+                    {
+                        templates_remove.push((path, file.sha));
+                    }
+                }
+            }
+        }
+        let any_file_changes = !templates_add.is_empty()
+            || !templates_update.is_empty()
+            || !templates_remove.is_empty();
 
         let current_labels = gh.list_repo_labels(&repo_name).await?;
         let diff = diff_labels(&merged_cfg.labels, &current_labels);
@@ -186,13 +227,46 @@ async fn handle_repos(
             Mode::Plan => {
                 let (settings_count, settings_lines) = format_repo_settings(settings_diff.as_ref());
                 let (bp_count, bp_lines) = format_branch_protection(&bp_changes, verbose);
+                let (pr_note, pr_branch_display) = if any_file_changes {
+                    if let Some(pr) = &existing_pr {
+                        let branch = pr.head.ref_field.clone();
+                        (
+                            format!(
+                                "draft PR will be updated for .github file updates (reusing #{})",
+                                pr.number
+                            ),
+                            Some(branch),
+                        )
+                    } else {
+                        let branch_name = format!("{PR_BRANCH_PREFIX}{base_branch}");
+                        (
+                            "draft PR will be created for .github file updates".to_string(),
+                            Some(branch_name),
+                        )
+                    }
+                } else if let Some(pr) = &existing_pr {
+                    (
+                        format!(
+                            "existing draft PR #{} already present for .github files",
+                            pr.number
+                        ),
+                        Some(pr.head.ref_field.clone()),
+                    )
+                } else {
+                    ("no PR (no .github file changes)".to_string(), None)
+                };
                 println!(
-                    "Repo {} (plan):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  .github files add ({}) :{}\n  .github files update ({}) :{}\n  Add labels ({}) :{}\n  Update labels ({}) :{}\n  Remove labels ({}) :{}\n  Blocked removals ({}) :{}",
+                    "Repo {} (plan):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  PR:\n    {}{}\n    .github files add ({}) :{}\n    .github files update ({}) :{}\n    .github files remove ({}) :{}\n  Add labels ({}) :{}\n  Update labels ({}) :{}\n  Remove labels ({}) :{}\n  Blocked removals ({}) :{}",
                     repo_name,
                     settings_count,
                     settings_lines,
                     bp_count,
                     bp_lines,
+                    pr_note,
+                    pr_branch_display
+                        .as_ref()
+                        .map(|b| format!(" on branch '{}'\n", b))
+                        .unwrap_or_else(String::new),
                     format_count(templates_add.len(), ColorKind::Add),
                     format_template_lines(&templates_add, ColorKind::Add),
                     format_count(templates_update.len(), ColorKind::Update),
@@ -203,6 +277,8 @@ async fn handle_repos(
                             .collect::<Vec<_>>(),
                         ColorKind::Update
                     ),
+                    format_count(templates_remove.len(), ColorKind::Remove),
+                    format_remove_lines(&templates_remove),
                     format_count(diff.to_add.len(), ColorKind::Add),
                     format_label_lines(&diff.to_add, ColorKind::Add),
                     format_count(diff.to_update.len(), ColorKind::Update),
@@ -224,21 +300,54 @@ async fn handle_repos(
                     gh.set_branch_protection(&repo_name, &bp.target).await?;
                 }
 
-                for tpl in &templates_add {
-                    let msg = format!("Add .github file {} via gh-governor", tpl.path);
-                    gh.put_file(&repo_name, &tpl.path, &tpl.contents, None, &msg)
+                let any_file_changes = !templates_add.is_empty() || !templates_update.is_empty();
+                let existing_pr = if any_file_changes || existing_pr.is_some() {
+                    gh.find_open_pr_by_head_prefix(&repo_name, PR_BRANCH_PREFIX, &base_branch)
+                        .await?
+                } else {
+                    None
+                };
+                let branch_name = if let Some(pr) = &existing_pr {
+                    Some(pr.head.ref_field.clone())
+                } else if any_file_changes {
+                    let name = format!("{PR_BRANCH_PREFIX}{}", base_branch);
+                    let base_sha = gh.get_branch_sha(&repo_name, &base_branch).await?;
+                    gh.create_branch_from(&repo_name, &name, &base_sha).await?;
+                    Some(name)
+                } else {
+                    None
+                };
+
+                if let Some(branch_ref) = branch_name.as_deref() {
+                    for tpl in &templates_add {
+                        let msg = format!("Add .github file {} via gh-governor", tpl.path);
+                        gh.put_file(
+                            &repo_name,
+                            &tpl.path,
+                            &tpl.contents,
+                            None,
+                            &msg,
+                            Some(branch_ref),
+                        )
                         .await?;
-                }
-                for (tpl, sha) in &templates_update {
-                    let msg = format!("Update .github file {} via gh-governor", tpl.path);
-                    gh.put_file(
-                        &repo_name,
-                        &tpl.path,
-                        &tpl.contents,
-                        Some(sha.clone()),
-                        &msg,
-                    )
-                    .await?;
+                    }
+                    for (tpl, sha) in &templates_update {
+                        let msg = format!("Update .github file {} via gh-governor", tpl.path);
+                        gh.put_file(
+                            &repo_name,
+                            &tpl.path,
+                            &tpl.contents,
+                            Some(sha.clone()),
+                            &msg,
+                            Some(branch_ref),
+                        )
+                        .await?;
+                    }
+                    for (path, sha) in &templates_remove {
+                        let msg = format!("Remove .github file {} via gh-governor", path);
+                        gh.delete_file(&repo_name, path, sha, &msg, Some(branch_ref))
+                            .await?;
+                    }
                 }
 
                 for label in &diff.to_add {
@@ -257,15 +366,52 @@ async fn handle_repos(
                         format_blocked_lines(&blocked_removals, verbose)
                     );
                 }
+
+                let mut pr_status = "no PR (no .github file changes)".to_string();
+                if let Some(branch) = branch_name.clone() {
+                    let pr_title =
+                        format!("gh-governor updates ({})", Utc::now().format("%Y-%m-%d"));
+                    let pr_body = Some("Automated .github updates via gh-governor");
+                    if let Some(pr) = existing_pr {
+                        if pr.title.as_deref() != Some(&pr_title) || pr.body.as_deref() != pr_body {
+                            gh.update_pull_request(&repo_name, pr.number, &pr_title, pr_body)
+                                .await?;
+                        }
+                        pr_status = if any_file_changes {
+                            format!(
+                                "update existing draft PR #{} ({} -> {})",
+                                pr.number, branch, base_branch
+                            )
+                        } else {
+                            format!(
+                                "existing draft PR #{} already up to date ({} -> {})",
+                                pr.number, branch, base_branch
+                            )
+                        };
+                    } else {
+                        gh.create_pull_request(
+                            &repo_name,
+                            &pr_title,
+                            &branch,
+                            &base_branch,
+                            pr_body,
+                            true,
+                        )
+                        .await?;
+                        pr_status = format!("create draft PR ({} -> {})", branch, base_branch);
+                    }
+                }
+
                 let (settings_count, settings_lines) = format_repo_settings(settings_diff.as_ref());
                 let (bp_count, bp_lines) = format_branch_protection(&bp_changes, verbose);
                 println!(
-                    "Repo {} (apply):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  .github files added ({}) :{}\n  .github files updated ({}) :{}\n  Added labels ({}) :{}\n  Updated labels ({}) :{}\n  Removed labels ({}) :{}",
+                    "Repo {} (apply):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  PR:\n    {}\n    .github files added ({}) :{}\n    .github files updated ({}) :{}\n    .github files removed ({}) :{}\n  Added labels ({}) :{}\n  Updated labels ({}) :{}\n  Removed labels ({}) :{}",
                     repo_name,
                     settings_count,
                     settings_lines,
                     bp_count,
                     bp_lines,
+                    pr_status,
                     format_count(templates_add.len(), ColorKind::Add),
                     format_template_lines(&templates_add, ColorKind::Add),
                     format_count(templates_update.len(), ColorKind::Update),
@@ -276,6 +422,8 @@ async fn handle_repos(
                             .collect::<Vec<_>>(),
                         ColorKind::Update
                     ),
+                    format_count(templates_remove.len(), ColorKind::Remove),
+                    format_remove_lines(&templates_remove),
                     format_count(diff.to_add.len(), ColorKind::Add),
                     format_label_lines(&diff.to_add, ColorKind::Add),
                     format_count(diff.to_update.len(), ColorKind::Update),
@@ -286,6 +434,40 @@ async fn handle_repos(
                     ),
                     format_label_lines(&removable, ColorKind::Remove),
                 );
+
+                if let Some(branch) = branch_name {
+                    let pr_title =
+                        format!("gh-governor updates ({})", Utc::now().format("%Y-%m-%d"));
+                    let pr_body = Some("Automated .github updates via gh-governor");
+                    if let Some(pr) = gh
+                        .find_open_pr_by_head_prefix(&repo_name, &branch, &base_branch)
+                        .await?
+                    {
+                        // Update title/body if they differ
+                        if pr.title.as_deref() != Some(&pr_title) || pr.body.as_deref() != pr_body {
+                            gh.update_pull_request(&repo_name, pr.number, &pr_title, pr_body)
+                                .await?;
+                        }
+                        println!(
+                            "Repo {} (apply): reusing existing PR #{} from '{}' to '{}'",
+                            repo_name, pr.number, branch, base_branch
+                        );
+                    } else {
+                        gh.create_pull_request(
+                            &repo_name,
+                            &pr_title,
+                            &branch,
+                            &base_branch,
+                            pr_body,
+                            true,
+                        )
+                        .await?;
+                        println!(
+                            "Repo {} (apply): opened draft PR '{}' from '{}' to '{}'",
+                            repo_name, pr_title, branch, base_branch
+                        );
+                    }
+                }
             }
         }
     }
@@ -360,6 +542,18 @@ fn format_template_lines(templates: &[IssueTemplateFile], kind: ColorKind) -> St
             "    - {}",
             apply_color(&short_github_path(&tpl.path), kind)
         ));
+    }
+    out
+}
+
+fn format_remove_lines(files: &[(String, String)]) -> String {
+    if files.is_empty() {
+        return " none".to_string();
+    }
+    let mut out = String::new();
+    for (path, _) in files {
+        out.push('\n');
+        out.push_str(&format!("    - {}", apply_color(path, ColorKind::Remove)));
     }
     out
 }

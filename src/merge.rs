@@ -46,10 +46,15 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
         }
 
         for template in &set.issue_templates {
-            if templates.contains_key(&template.path) {
-                return Err(MergeError::TemplateConflict(template.path.clone()));
+            match templates.get(&template.path) {
+                Some(existing) if existing != template => {
+                    return Err(MergeError::TemplateConflict(template.path.clone()));
+                }
+                Some(_) => {}
+                None => {
+                    templates.insert(template.path.clone(), template.clone());
+                }
             }
-            templates.insert(template.path.clone(), template.clone());
         }
 
         if let Some(settings) = &set.repo_settings {
@@ -151,16 +156,32 @@ mod tests {
         let mut a = base_set("a");
         a.issue_templates.push(IssueTemplateFile {
             path: ".github/ISSUE_TEMPLATE/bug.yml".to_string(),
-            contents: String::new(),
+            contents: "a".to_string(),
         });
         let mut b = base_set("b");
         b.issue_templates.push(IssueTemplateFile {
             path: ".github/ISSUE_TEMPLATE/bug.yml".to_string(),
-            contents: String::new(),
+            contents: "b".to_string(),
         });
         assert!(matches!(
             merge_sets_for_repo(&[a, b]),
             Err(MergeError::TemplateConflict(_))
         ));
+    }
+
+    #[test]
+    fn allows_identical_templates() {
+        let mut a = base_set("a");
+        a.issue_templates.push(IssueTemplateFile {
+            path: ".github/ISSUE_TEMPLATE/bug.yml".to_string(),
+            contents: "same".to_string(),
+        });
+        let mut b = base_set("b");
+        b.issue_templates.push(IssueTemplateFile {
+            path: ".github/ISSUE_TEMPLATE/bug.yml".to_string(),
+            contents: "same".to_string(),
+        });
+        let merged = merge_sets_for_repo(&[a, b]).unwrap();
+        assert_eq!(merged.issue_templates.len(), 1);
     }
 }

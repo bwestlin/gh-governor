@@ -18,7 +18,7 @@ pub struct LabelSpec {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueTemplateFile {
     pub path: String,
     pub contents: String,

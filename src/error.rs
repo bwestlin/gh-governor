@@ -44,6 +44,8 @@ pub enum Error {
     Octo(#[from] octocrab::Error),
     #[error("repository '{org}/{repo}' not found")]
     RepoNotFound { org: String, repo: String },
+    #[error("repo '{repo}' has conflicting config: {reason}")]
+    MergeConflict { repo: String, reason: String },
 }
 
 impl Error {

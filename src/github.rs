@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use octocrab::Octocrab;
 use octocrab::models::{Label, issues::Issue};
 use octocrab::params;
@@ -12,6 +13,12 @@ use crate::settings::{
     RequiredPullRequestReviews, RequiredStatusChecks, ReviewDismissalRestrictions, StatusCheck,
 };
 use tracing::warn;
+
+#[derive(Debug, Clone)]
+pub struct RepoFile {
+    pub sha: String,
+    pub content: String,
+}
 
 #[derive(Clone)]
 pub struct GithubClient {
@@ -224,6 +231,74 @@ impl GithubClient {
             .await
             .map_err(|e| map_repo_error(&self.org, repo, e))?;
 
+        Ok(())
+    }
+
+    pub async fn get_file(&self, repo: &str, path: &str) -> Result<Option<RepoFile>> {
+        #[derive(serde::Deserialize)]
+        struct ContentFile {
+            content: String,
+            sha: String,
+            encoding: String,
+        }
+
+        let route = format!("/repos/{}/{}/contents/{}", self.org, repo, path);
+        match self.inner.get::<ContentFile, _, ()>(route, None).await {
+            Ok(file) => {
+                if file.encoding != "base64" {
+                    return Ok(None);
+                }
+                let decoded = match BASE64.decode(file.content.replace('\n', "")) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        warn!(
+                            "could not decode file content for {}/{}:{}: {}",
+                            self.org, repo, path, e
+                        );
+                        return Ok(None);
+                    }
+                };
+                let content = String::from_utf8_lossy(&decoded).to_string();
+                Ok(Some(RepoFile {
+                    sha: file.sha,
+                    content,
+                }))
+            }
+            Err(octocrab::Error::GitHub { ref source, .. })
+                if source.status_code == reqwest::StatusCode::NOT_FOUND =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+        }
+    }
+
+    pub async fn put_file(
+        &self,
+        repo: &str,
+        path: &str,
+        content: &str,
+        sha: Option<String>,
+        message: &str,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            message: &'a str,
+            content: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            sha: Option<String>,
+        }
+
+        let body = Body {
+            message,
+            content: BASE64.encode(content.as_bytes()),
+            sha,
+        };
+        let route = format!("/repos/{}/{}/contents/{}", self.org, repo, path);
+        self.inner
+            ._put(route, Some(&body))
+            .await
+            .map_err(|e| map_repo_error(&self.org, repo, e))?;
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
 pub struct RepoSettings {
@@ -13,6 +13,102 @@ pub struct PullRequestSettings {
     pub allow_rebase_merge: Option<bool>,
     pub allow_auto_merge: Option<bool>,
     pub delete_branch_on_merge: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_commit_message_option: Option<MergeCommitMessageOption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub squash_merge_option: Option<SquashMergeOption>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SquashMergeCommitMessage {
+    PrBody,
+    CommitMessages,
+    Blank,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SquashMergeCommitTitle {
+    PrTitle,
+    CommitOrPrTitle,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MergeCommitMessage {
+    PrTitle,
+    PrBody,
+    Blank,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MergeCommitTitle {
+    PrTitle,
+    MergeMessage,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SquashMergeOption {
+    DefaultMessage,
+    PullRequestTitle,
+    PullRequestTitleAndCommitDetails,
+    PullRequestTitleAndDescription,
+}
+
+pub fn map_squash_option(
+    opt: &SquashMergeOption,
+) -> (
+    Option<SquashMergeCommitTitle>,
+    Option<SquashMergeCommitMessage>,
+) {
+    match opt {
+        SquashMergeOption::DefaultMessage => (
+            Some(SquashMergeCommitTitle::CommitOrPrTitle),
+            Some(SquashMergeCommitMessage::CommitMessages),
+        ),
+        SquashMergeOption::PullRequestTitle => (
+            Some(SquashMergeCommitTitle::PrTitle),
+            Some(SquashMergeCommitMessage::Blank),
+        ),
+        SquashMergeOption::PullRequestTitleAndCommitDetails => (
+            Some(SquashMergeCommitTitle::PrTitle),
+            Some(SquashMergeCommitMessage::CommitMessages),
+        ),
+        SquashMergeOption::PullRequestTitleAndDescription => (
+            Some(SquashMergeCommitTitle::PrTitle),
+            Some(SquashMergeCommitMessage::PrBody),
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeCommitMessageOption {
+    DefaultMessage,
+    PullRequestTitle,
+    PullRequestTitleAndDescription,
+}
+
+pub fn map_merge_message_option(
+    opt: &MergeCommitMessageOption,
+) -> (Option<MergeCommitTitle>, Option<MergeCommitMessage>) {
+    match opt {
+        MergeCommitMessageOption::DefaultMessage => (
+            Some(MergeCommitTitle::MergeMessage),
+            Some(MergeCommitMessage::PrTitle),
+        ),
+        MergeCommitMessageOption::PullRequestTitle => (
+            Some(MergeCommitTitle::PrTitle),
+            Some(MergeCommitMessage::PrTitle),
+        ),
+        MergeCommitMessageOption::PullRequestTitleAndDescription => (
+            Some(MergeCommitTitle::PrTitle),
+            Some(MergeCommitMessage::PrBody),
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]

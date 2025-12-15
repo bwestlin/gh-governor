@@ -606,9 +606,9 @@ fn format_repo_settings(diff: Option<&RepoSettingsDiff>) -> (String, String) {
                     change.field,
                     change
                         .current
-                        .map(|v| v.to_string())
+                        .clone()
                         .unwrap_or_else(|| "unset".to_string()),
-                    apply_color(&change.desired.to_string(), ColorKind::Update)
+                    apply_color(&change.desired, ColorKind::Update)
                 );
                 out.push('\n');
                 out.push_str(&line);

@@ -177,6 +177,8 @@ impl GithubClient {
                 allow_rebase_merge: repo_model.allow_rebase_merge,
                 allow_auto_merge: repo_model.allow_auto_merge,
                 delete_branch_on_merge: repo_model.delete_branch_on_merge,
+                merge_commit_message_option: None,
+                squash_merge_option: None,
             }),
         })
     }
@@ -194,7 +196,29 @@ impl GithubClient {
             allow_auto_merge: Option<bool>,
             #[serde(skip_serializing_if = "Option::is_none")]
             delete_branch_on_merge: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            merge_commit_message: Option<crate::settings::MergeCommitMessage>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            merge_commit_title: Option<crate::settings::MergeCommitTitle>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            squash_merge_commit_message: Option<crate::settings::SquashMergeCommitMessage>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            squash_merge_commit_title: Option<crate::settings::SquashMergeCommitTitle>,
         }
+
+        let (merge_commit_title, merge_commit_message) = settings
+            .pull_requests
+            .as_ref()
+            .and_then(|p| p.merge_commit_message_option.as_ref())
+            .map(crate::settings::map_merge_message_option)
+            .unwrap_or((None, None));
+
+        let (option_title, option_message) = settings
+            .pull_requests
+            .as_ref()
+            .and_then(|p| p.squash_merge_option.as_ref())
+            .map(crate::settings::map_squash_option)
+            .unwrap_or((None, None));
 
         let body = Body {
             allow_merge_commit: settings
@@ -217,6 +241,10 @@ impl GithubClient {
                 .pull_requests
                 .as_ref()
                 .and_then(|p| p.delete_branch_on_merge),
+            merge_commit_message,
+            merge_commit_title,
+            squash_merge_commit_message: option_message,
+            squash_merge_commit_title: option_title,
         };
 
         // Only send an update if at least one field is present.

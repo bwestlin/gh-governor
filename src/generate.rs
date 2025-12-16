@@ -24,6 +24,7 @@ pub async fn generate_configs(
     output_base: &Path,
     org: &str,
     verbose: bool,
+    format: OutputFormat,
 ) -> Result<()> {
     println!(
         "Generating configs for org '{}' into {}",
@@ -86,6 +87,7 @@ pub async fn generate_configs(
             common_settings.as_ref(),
             common_bp.as_ref(),
             &common_templates,
+            format,
         )?;
         root.default_sets.push("core".to_string());
         if verbose {
@@ -132,6 +134,7 @@ pub async fn generate_configs(
                 settings.as_ref(),
                 bp.as_ref(),
                 &templates,
+                format,
             )?;
             sets.push(snap.name.clone());
             if verbose {
@@ -157,8 +160,8 @@ pub async fn generate_configs(
     }
 
     fs::create_dir_all(output_base)?;
-    let root_path = output_base.join("gh-governor-conf.toml");
-    let root_contents = toml::to_string_pretty(&root)?;
+    let root_path = output_base.join(format!("gh-governor-conf.{}", format.ext()));
+    let root_contents = serialize_with_format(&root, format)?;
     fs::write(&root_path, root_contents)?;
     println!("Done. Root config written to {}", root_path.display());
 
@@ -374,6 +377,7 @@ fn write_set(
     settings: Option<&RepoSettings>,
     bp: Option<&BranchProtectionRule>,
     templates: &[IssueTemplateFile],
+    format: OutputFormat,
 ) -> Result<()> {
     fs::create_dir_all(dir)?;
 
@@ -389,18 +393,24 @@ fn write_set(
             }
             map.insert(lbl.name.clone(), fields);
         }
-        let contents = toml::to_string_pretty(&map)?;
-        fs::write(dir.join("labels.toml"), contents)?;
+        let contents = serialize_with_format(&map, format)?;
+        fs::write(dir.join(format!("labels.{}", format.ext())), contents)?;
     }
 
     if let Some(settings) = settings {
-        let contents = toml::to_string_pretty(settings)?;
-        fs::write(dir.join("repo-settings.toml"), contents)?;
+        let contents = serialize_with_format(settings, format)?;
+        fs::write(
+            dir.join(format!("repo-settings.{}", format.ext())),
+            contents,
+        )?;
     }
 
     if let Some(bp) = bp {
-        let contents = toml::to_string_pretty(bp)?;
-        fs::write(dir.join("branch-protection.toml"), contents)?;
+        let contents = serialize_with_format(bp, format)?;
+        fs::write(
+            dir.join(format!("branch-protection.{}", format.ext())),
+            contents,
+        )?;
     }
 
     for tpl in templates {
@@ -412,4 +422,31 @@ fn write_set(
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+pub enum OutputFormat {
+    Toml,
+    Yml,
+    Json,
+}
+
+impl OutputFormat {
+    fn ext(&self) -> &'static str {
+        match self {
+            OutputFormat::Toml => "toml",
+            OutputFormat::Yml => "yml",
+            OutputFormat::Json => "json",
+        }
+    }
+}
+
+fn serialize_with_format<T: Serialize>(value: &T, fmt: OutputFormat) -> Result<String> {
+    match fmt {
+        OutputFormat::Toml => toml::to_string_pretty(value).map_err(crate::error::Error::TomlSer),
+        OutputFormat::Yml => serde_yaml::to_string(value).map_err(crate::error::Error::YamlSer),
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(value).map_err(crate::error::Error::JsonSer)
+        }
+    }
 }

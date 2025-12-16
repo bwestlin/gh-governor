@@ -38,6 +38,10 @@ pub enum Error {
         "no main config file found at {base} (looked for gh-governor-conf.{{toml,yml,yaml,json}})"
     )]
     MissingConfig { base: PathBuf },
+    #[error("failed to serialize yaml: {0}")]
+    YamlSer(#[from] serde_yaml::Error),
+    #[error("failed to serialize json: {0}")]
+    JsonSer(#[from] serde_json::Error),
     #[error("glob pattern error: {0}")]
     GlobPattern(#[from] glob::PatternError),
     #[error("glob error reading paths: {0}")]

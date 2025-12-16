@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use gh_governor::app::{Mode, run};
 use gh_governor::config::{load_root_config, resolve_sets_dir};
@@ -57,7 +57,27 @@ enum Command {
         /// Output directory for generated configuration (defaults to ./generated-conf-<org>)
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Format for generated configuration files (toml|yml|json)
+        #[arg(long, value_enum, default_value = "toml")]
+        format: OutputFormatArg,
     },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum OutputFormatArg {
+    Toml,
+    Yml,
+    Json,
+}
+
+impl From<OutputFormatArg> for gh_governor::generate::OutputFormat {
+    fn from(val: OutputFormatArg) -> Self {
+        match val {
+            OutputFormatArg::Toml => gh_governor::generate::OutputFormat::Toml,
+            OutputFormatArg::Yml => gh_governor::generate::OutputFormat::Yml,
+            OutputFormatArg::Json => gh_governor::generate::OutputFormat::Json,
+        }
+    }
 }
 
 #[tokio::main]
@@ -101,7 +121,12 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Command::Generate { repos, org, output } => {
+        Command::Generate {
+            repos,
+            org,
+            output,
+            format,
+        } => {
             if repos.is_empty() {
                 return Err(gh_governor::error::Error::InvalidArgs(
                     "generate requires at least one --repo".to_string(),
@@ -110,8 +135,15 @@ async fn main() -> Result<()> {
             let gh = GithubClient::new(&args.token, org.clone())?;
             let output_dir =
                 output.unwrap_or_else(|| PathBuf::from(format!("./generated-conf-{org}")));
-            gh_governor::generate::generate_configs(&gh, &repos, &output_dir, &org, args.verbose)
-                .await
+            gh_governor::generate::generate_configs(
+                &gh,
+                &repos,
+                &output_dir,
+                &org,
+                args.verbose,
+                format.into(),
+            )
+            .await
         }
     }
 }

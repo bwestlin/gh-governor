@@ -10,10 +10,6 @@ use gh_governor::github::GithubClient;
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
-    /// Directory containing gh-governor-conf.(toml|yml|yaml|json) and config-sets/
-    #[arg(long, default_value = ".")]
-    config_base: PathBuf,
-
     /// GitHub token (or set env GITHUB_TOKEN)
     #[arg(
         long,
@@ -38,11 +34,29 @@ enum Command {
         /// Limit to specific repositories; if omitted, all repos in config are used
         #[arg(long = "repo", value_name = "NAME")]
         repos: Vec<String>,
+        /// Directory containing gh-governor-conf.(toml|yml|yaml|json) and config-sets/
+        #[arg(long, default_value = ".")]
+        config_base: PathBuf,
     },
     /// Apply changes (creates/updates labels and settings)
     Apply {
         #[arg(long = "repo", value_name = "NAME")]
         repos: Vec<String>,
+        /// Directory containing gh-governor-conf.(toml|yml|yaml|json) and config-sets/
+        #[arg(long, default_value = ".")]
+        config_base: PathBuf,
+    },
+    /// Generate config files from existing repositories
+    Generate {
+        /// Repositories to harvest (at least one required)
+        #[arg(long = "repo", value_name = "NAME")]
+        repos: Vec<String>,
+        /// GitHub organization to read from
+        #[arg(long)]
+        org: String,
+        /// Output directory for generated configuration (defaults to ./generated-conf-<org>)
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -56,22 +70,48 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let (mode, only_repos) = match args.command {
-        Command::Plan { repos } => (Mode::Plan, repos),
-        Command::Apply { repos } => (Mode::Apply, repos),
-    };
-    let (root, root_path) = load_root_config(&args.config_base)?;
-    let sets_dir = resolve_sets_dir(&args.config_base, &root);
-    let gh = GithubClient::new(&args.token, root.org.clone())?;
-
-    run(
-        mode,
-        root,
-        root_path,
-        sets_dir,
-        only_repos,
-        gh,
-        args.verbose,
-    )
-    .await
+    match args.command {
+        Command::Plan { repos, config_base } => {
+            let (root, root_path) = load_root_config(&config_base)?;
+            let sets_dir = resolve_sets_dir(&config_base, &root);
+            let gh = GithubClient::new(&args.token, root.org.clone())?;
+            run(
+                Mode::Plan,
+                root,
+                root_path,
+                sets_dir,
+                repos,
+                gh,
+                args.verbose,
+            )
+            .await
+        }
+        Command::Apply { repos, config_base } => {
+            let (root, root_path) = load_root_config(&config_base)?;
+            let sets_dir = resolve_sets_dir(&config_base, &root);
+            let gh = GithubClient::new(&args.token, root.org.clone())?;
+            run(
+                Mode::Apply,
+                root,
+                root_path,
+                sets_dir,
+                repos,
+                gh,
+                args.verbose,
+            )
+            .await
+        }
+        Command::Generate { repos, org, output } => {
+            if repos.is_empty() {
+                return Err(gh_governor::error::Error::InvalidArgs(
+                    "generate requires at least one --repo".to_string(),
+                ));
+            }
+            let gh = GithubClient::new(&args.token, org.clone())?;
+            let output_dir =
+                output.unwrap_or_else(|| PathBuf::from(format!("./generated-conf-{org}")));
+            gh_governor::generate::generate_configs(&gh, &repos, &output_dir, &org, args.verbose)
+                .await
+        }
+    }
 }

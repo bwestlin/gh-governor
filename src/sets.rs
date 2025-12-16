@@ -3,13 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glob::glob;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::settings::{BranchProtectionConfig, RepoSettings};
 use crate::util::{SUPPORTED_EXTS, parse_by_extension};
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LabelSpec {
     pub name: String,
     #[serde(default)]

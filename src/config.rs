@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::util::{SUPPORTED_EXTS, parse_by_extension};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RepoConfig {
     pub name: String,
     #[serde(default)]
@@ -14,7 +14,7 @@ pub struct RepoConfig {
 }
 
 /// Root configuration read from `gh-governor-conf.{toml,yml,yaml,json}`.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RootConfig {
     /// GitHub organization to operate on.
     pub org: String,

@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct RepoSettings {
     #[serde(default)]
     pub pull_requests: Option<PullRequestSettings>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PullRequestSettings {
     pub allow_merge_commit: Option<bool>,
     pub allow_squash_merge: Option<bool>,
@@ -111,13 +111,13 @@ pub fn map_merge_message_option(
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct BranchProtectionConfig {
     #[serde(default)]
     pub rules: Vec<BranchProtectionRule>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct BranchProtectionRule {
     pub pattern: String,
     #[serde(default)]
@@ -142,7 +142,7 @@ pub struct BranchProtectionRule {
     pub required_signatures: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RequiredStatusChecks {
     pub strict: Option<bool>,
     #[serde(default)]
@@ -151,14 +151,14 @@ pub struct RequiredStatusChecks {
     pub checks: Option<Vec<StatusCheck>>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct StatusCheck {
     pub context: String,
     #[serde(default)]
     pub app_id: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RequiredPullRequestReviews {
     #[serde(default)]
     pub dismiss_stale_reviews: Option<bool>,
@@ -172,7 +172,7 @@ pub struct RequiredPullRequestReviews {
     pub dismissal_restrictions: Option<ReviewDismissalRestrictions>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ReviewDismissalRestrictions {
     #[serde(default)]
     pub users: Option<Vec<String>>,
@@ -180,7 +180,7 @@ pub struct ReviewDismissalRestrictions {
     pub teams: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct BranchRestrictions {
     #[serde(default)]
     pub users: Option<Vec<String>>,

@@ -18,6 +18,8 @@ pub enum Error {
         source: toml::de::Error,
         path: String,
     },
+    #[error("failed to write toml: {0}")]
+    TomlSer(#[from] toml::ser::Error),
     #[error("failed to parse yaml{path}: {source}")]
     Yaml {
         #[source]
@@ -46,6 +48,10 @@ pub enum Error {
     RepoNotFound { org: String, repo: String },
     #[error("repo '{repo}' has conflicting config: {reason}")]
     MergeConflict { repo: String, reason: String },
+    #[error("I/O error: {0}")]
+    IoSimple(#[from] std::io::Error),
+    #[error("invalid arguments: {0}")]
+    InvalidArgs(String),
 }
 
 impl Error {

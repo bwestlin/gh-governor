@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -16,6 +16,19 @@ struct RepoSnapshot {
     settings: Option<RepoSettings>,
     branch_protection: Option<BranchProtectionRule>,
     templates: Vec<IssueTemplateFile>,
+}
+
+fn group_signatures<T: Serialize + Clone>(
+    items: impl IntoIterator<Item = (String, T)>,
+) -> HashMap<String, (Vec<String>, T)> {
+    let mut map: HashMap<String, (Vec<String>, T)> = HashMap::new();
+    for (repo, val) in items {
+        let key = serde_json::to_string(&val).unwrap_or_default();
+        map.entry(key)
+            .and_modify(|(repos, _)| repos.push(repo.clone()))
+            .or_insert_with(|| (vec![repo], val));
+    }
+    map
 }
 
 pub async fn generate_configs(
@@ -75,6 +88,7 @@ pub async fn generate_configs(
     };
 
     let sets_root = output_base.join("config-sets");
+    let mut used_names: HashSet<String> = HashSet::new();
     if !common_labels.is_empty()
         || common_settings.is_some()
         || common_bp.is_some()
@@ -101,6 +115,8 @@ pub async fn generate_configs(
         }
     }
 
+    // Remove core items
+    let mut residuals = Vec::new();
     for snap in snapshots {
         let mut labels = snap.labels.clone();
         labels.retain(|l| !common_labels.iter().any(|c| c.name == l.name));
@@ -125,36 +141,92 @@ pub async fn generate_configs(
         });
         templates.retain(|t| !t.path.ends_with("config.yml"));
 
-        let mut sets = Vec::new();
-        if !labels.is_empty() || settings.is_some() || bp.is_some() || !templates.is_empty() {
-            let set_dir = sets_root.join(&snap.name);
-            write_set(
-                &set_dir,
-                &labels,
-                settings.as_ref(),
-                bp.as_ref(),
-                &templates,
-                format,
-            )?;
-            sets.push(snap.name.clone());
-            if verbose {
-                println!(
-                    "  set {}: labels {}, templates {}, settings {}, branch protection {}",
-                    snap.name,
-                    labels.len(),
-                    templates.len(),
-                    settings.as_ref().map(|_| "yes").unwrap_or("no"),
-                    bp.as_ref().map(|_| "yes").unwrap_or("no")
-                );
-            }
-        }
+        residuals.push((snap.name.clone(), labels, settings, bp, templates));
+    }
 
+    // Group components independently.
+    let label_groups = group_signatures(
+        residuals
+            .iter()
+            .map(|(name, labels, _, _, _)| (name.clone(), labels.clone())),
+    );
+    let template_groups = group_signatures(
+        residuals
+            .iter()
+            .map(|(name, _, _, _, templates)| (name.clone(), templates.clone())),
+    );
+    let settings_groups = group_signatures(
+        residuals
+            .iter()
+            .filter_map(|(name, _, settings, _, _)| settings.clone().map(|s| (name.clone(), s))),
+    );
+    let bp_groups = group_signatures(
+        residuals
+            .iter()
+            .filter_map(|(name, _, _, bp, _)| bp.clone().map(|b| (name.clone(), b))),
+    );
+
+    // repo -> sets
+    let mut set_mapping: HashMap<String, Vec<String>> = HashMap::new();
+
+    create_component_sets(
+        "labels",
+        &label_groups,
+        &mut used_names,
+        &mut set_mapping,
+        |set_name, payload| write_set(&sets_root.join(set_name), payload, None, None, &[], format),
+    )?;
+
+    create_component_sets(
+        "templates",
+        &template_groups,
+        &mut used_names,
+        &mut set_mapping,
+        |set_name, payload| write_set(&sets_root.join(set_name), &[], None, None, payload, format),
+    )?;
+
+    create_component_sets(
+        "settings",
+        &settings_groups,
+        &mut used_names,
+        &mut set_mapping,
+        |set_name, payload| {
+            write_set(
+                &sets_root.join(set_name),
+                &[],
+                Some(payload),
+                None,
+                &[],
+                format,
+            )
+        },
+    )?;
+
+    create_component_sets(
+        "bp",
+        &bp_groups,
+        &mut used_names,
+        &mut set_mapping,
+        |set_name, payload| {
+            write_set(
+                &sets_root.join(set_name),
+                &[],
+                None,
+                Some(payload),
+                &[],
+                format,
+            )
+        },
+    )?;
+
+    for (repo_name, _, _, _, _) in residuals {
+        let mut sets = set_mapping.remove(&repo_name).unwrap_or_default();
+        sets.sort();
         if !root.default_sets.is_empty() {
             sets.insert(0, "core".to_string());
         }
-
         root.repos.push(RepoConfig {
-            name: snap.name.clone(),
+            name: repo_name,
             sets,
         });
     }
@@ -333,6 +405,40 @@ fn ensure_config_for_templates(
             contents,
         });
     }
+}
+
+fn create_component_sets<T, F>(
+    prefix: &str,
+    groups: &HashMap<String, (Vec<String>, T)>,
+    used_names: &mut HashSet<String>,
+    set_mapping: &mut HashMap<String, Vec<String>>,
+    writer: F,
+) -> Result<()>
+where
+    T: Clone,
+    F: Fn(&str, &T) -> Result<()>,
+{
+    for (_sig, (repos_unsorted, payload)) in groups {
+        if repos_unsorted.is_empty() {
+            continue;
+        }
+        let mut repos = repos_unsorted.clone();
+        repos.sort();
+        let mut name = format!("{}-{}", prefix, repos.join("+"));
+        while used_names.contains(&name) {
+            name.push_str("-dup");
+        }
+        used_names.insert(name.clone());
+
+        writer(&name, payload)?;
+        for repo in repos {
+            set_mapping
+                .entry(repo.clone())
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    Ok(())
 }
 
 fn file_name(path: &str) -> Option<String> {

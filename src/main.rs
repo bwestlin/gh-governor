@@ -49,7 +49,7 @@ enum Command {
     /// Generate config files from existing repositories
     Generate {
         /// Repositories to harvest (at least one required)
-        #[arg(long = "repo", value_name = "NAME")]
+        #[arg(long = "repos", value_name = "NAME[,NAME...]", value_delimiter = ',')]
         repos: Vec<String>,
         /// GitHub organization to read from
         #[arg(long)]

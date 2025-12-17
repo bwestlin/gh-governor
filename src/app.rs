@@ -66,8 +66,8 @@ async fn handle_repos(
         let compare_branch = existing_pr.as_ref().map(|pr| pr.head.ref_field.clone());
 
         let mut bp_changes: Vec<BranchProtectionChange> = Vec::new();
-        if let Some(bp_cfg) = &merged_cfg.branch_protection {
-            for rule in &bp_cfg.rules {
+        if let Some(cfg) = desired_settings.and_then(|s| s.branch_protection.as_ref()) {
+            for rule in &cfg.rules {
                 let current = gh.get_branch_protection(&repo_name, &rule.pattern).await?;
                 let target = merge_branch_rule(rule, current.as_ref());
                 if current.as_ref() != Some(&target) {
@@ -892,7 +892,6 @@ mod tests {
                 contents: contents.to_string(),
             }],
             repo_settings: None,
-            branch_protection: None,
             checks: None,
         }
     }

@@ -7,14 +7,13 @@ use crate::config::{RepoConfig, RootConfig};
 use crate::error::Result;
 use crate::github::GithubClient;
 use crate::sets::{IssueTemplateFile, LabelSpec};
-use crate::settings::{BranchProtectionRule, RepoSettings};
+use crate::settings::RepoSettings;
 
 #[derive(Clone)]
 struct RepoSnapshot {
     name: String,
     labels: Vec<LabelSpec>,
     settings: Option<RepoSettings>,
-    branch_protection: Option<BranchProtectionRule>,
     templates: Vec<IssueTemplateFile>,
 }
 
@@ -55,10 +54,11 @@ pub async fn generate_configs(
                 snap.labels.len(),
                 snap.templates.len(),
                 snap.settings.as_ref().map(|_| "yes").unwrap_or("no"),
-                snap.branch_protection
+                snap.settings
                     .as_ref()
-                    .map(|_| "yes")
-                    .unwrap_or("no")
+                    .and_then(|s| s.branch_protection.as_ref())
+                    .map(|bp| bp.rules.len().to_string())
+                    .unwrap_or_else(|| "0".to_string())
             );
         }
         snapshots.push(snap);
@@ -70,7 +70,6 @@ pub async fn generate_configs(
 
     let common_labels = compute_common_labels(&snapshots);
     let common_settings = compute_common_settings(&snapshots);
-    let common_bp = compute_common_branch_protection(&snapshots);
     let mut common_templates = compute_common_templates(&snapshots);
     let base_config = snapshots.iter().find_map(|s| {
         s.templates
@@ -89,28 +88,22 @@ pub async fn generate_configs(
 
     let sets_root = output_base.join("config-sets");
     let mut used_names: HashSet<String> = HashSet::new();
-    if !common_labels.is_empty()
-        || common_settings.is_some()
-        || common_bp.is_some()
-        || !common_templates.is_empty()
-    {
+    if !common_labels.is_empty() || common_settings.is_some() || !common_templates.is_empty() {
         let core_dir = sets_root.join("core");
         write_set(
             &core_dir,
             &common_labels,
             common_settings.as_ref(),
-            common_bp.as_ref(),
             &common_templates,
             format,
         )?;
         root.default_sets.push("core".to_string());
         if verbose {
             println!(
-                "  core set: labels {}, templates {}, settings {}, branch protection {}",
+                "  core set: labels {}, templates {}, settings {}",
                 common_labels.len(),
                 common_templates.len(),
-                common_settings.as_ref().map(|_| "yes").unwrap_or("no"),
-                common_bp.as_ref().map(|_| "yes").unwrap_or("no")
+                common_settings.as_ref().map(|_| "yes").unwrap_or("no")
             );
         }
     }
@@ -127,12 +120,6 @@ pub async fn generate_configs(
             _ => None,
         };
 
-        let bp = match (&snap.branch_protection, &common_bp) {
-            (Some(b), Some(common)) if b != common => Some(b.clone()),
-            (Some(b), None) => Some(b.clone()),
-            _ => None,
-        };
-
         let mut templates = snap.templates.clone();
         templates.retain(|t| {
             !common_templates
@@ -141,29 +128,24 @@ pub async fn generate_configs(
         });
         templates.retain(|t| !t.path.ends_with("config.yml"));
 
-        residuals.push((snap.name.clone(), labels, settings, bp, templates));
+        residuals.push((snap.name.clone(), labels, settings, templates));
     }
 
     // Group components independently.
     let label_groups = group_signatures(
         residuals
             .iter()
-            .map(|(name, labels, _, _, _)| (name.clone(), labels.clone())),
+            .map(|(name, labels, _, _)| (name.clone(), labels.clone())),
     );
     let template_groups = group_signatures(
         residuals
             .iter()
-            .map(|(name, _, _, _, templates)| (name.clone(), templates.clone())),
+            .map(|(name, _, _, templates)| (name.clone(), templates.clone())),
     );
     let settings_groups = group_signatures(
         residuals
             .iter()
-            .filter_map(|(name, _, settings, _, _)| settings.clone().map(|s| (name.clone(), s))),
-    );
-    let bp_groups = group_signatures(
-        residuals
-            .iter()
-            .filter_map(|(name, _, _, bp, _)| bp.clone().map(|b| (name.clone(), b))),
+            .filter_map(|(name, _, settings, _)| settings.clone().map(|s| (name.clone(), s))),
     );
 
     // repo -> sets
@@ -174,7 +156,7 @@ pub async fn generate_configs(
         &label_groups,
         &mut used_names,
         &mut set_mapping,
-        |set_name, payload| write_set(&sets_root.join(set_name), payload, None, None, &[], format),
+        |set_name, payload| write_set(&sets_root.join(set_name), payload, None, &[], format),
     )?;
 
     create_component_sets(
@@ -182,7 +164,7 @@ pub async fn generate_configs(
         &template_groups,
         &mut used_names,
         &mut set_mapping,
-        |set_name, payload| write_set(&sets_root.join(set_name), &[], None, None, payload, format),
+        |set_name, payload| write_set(&sets_root.join(set_name), &[], None, payload, format),
     )?;
 
     create_component_sets(
@@ -190,36 +172,10 @@ pub async fn generate_configs(
         &settings_groups,
         &mut used_names,
         &mut set_mapping,
-        |set_name, payload| {
-            write_set(
-                &sets_root.join(set_name),
-                &[],
-                Some(payload),
-                None,
-                &[],
-                format,
-            )
-        },
+        |set_name, payload| write_set(&sets_root.join(set_name), &[], Some(payload), &[], format),
     )?;
 
-    create_component_sets(
-        "bp",
-        &bp_groups,
-        &mut used_names,
-        &mut set_mapping,
-        |set_name, payload| {
-            write_set(
-                &sets_root.join(set_name),
-                &[],
-                None,
-                Some(payload),
-                &[],
-                format,
-            )
-        },
-    )?;
-
-    for (repo_name, _, _, _, _) in residuals {
+    for (repo_name, _, _, _) in residuals {
         let mut sets = set_mapping.remove(&repo_name).unwrap_or_default();
         sets.sort();
         if !root.default_sets.is_empty() {
@@ -248,8 +204,18 @@ async fn fetch_repo(gh: &GithubClient, repo: &str) -> Result<RepoSnapshot> {
         .unwrap_or_else(|| "main".to_string());
 
     let labels = gh.list_repo_labels(repo).await?;
-    let settings = gh.get_repo_settings(repo).await?;
-    let bp = gh.get_branch_protection(repo, &default_branch).await?;
+    let mut settings = gh.get_repo_settings(repo).await?;
+
+    let mut bp_rules = Vec::new();
+    for branch in gh.list_branches(repo).await.unwrap_or_default() {
+        if let Some(rule) = gh.get_branch_protection(repo, &branch).await? {
+            bp_rules.push(rule);
+        }
+    }
+    if !bp_rules.is_empty() {
+        settings.branch_protection =
+            Some(crate::settings::BranchProtectionConfig { rules: bp_rules });
+    }
 
     let mut templates = Vec::new();
     let paths = gh
@@ -276,7 +242,6 @@ async fn fetch_repo(gh: &GithubClient, repo: &str) -> Result<RepoSnapshot> {
             })
             .collect(),
         settings: Some(settings),
-        branch_protection: bp,
         templates,
     })
 }
@@ -305,21 +270,6 @@ fn compute_common_settings(snapshots: &[RepoSnapshot]) -> Option<RepoSettings> {
     if snapshots
         .iter()
         .all(|s| s.settings.as_ref() == Some(&first))
-    {
-        Some(first)
-    } else {
-        None
-    }
-}
-
-fn compute_common_branch_protection(snapshots: &[RepoSnapshot]) -> Option<BranchProtectionRule> {
-    if snapshots.is_empty() {
-        return None;
-    }
-    let first = snapshots[0].branch_protection.clone()?;
-    if snapshots
-        .iter()
-        .all(|s| s.branch_protection.as_ref() == Some(&first))
     {
         Some(first)
     } else {
@@ -481,7 +431,6 @@ fn write_set(
     dir: &Path,
     labels: &[LabelSpec],
     settings: Option<&RepoSettings>,
-    bp: Option<&BranchProtectionRule>,
     templates: &[IssueTemplateFile],
     format: OutputFormat,
 ) -> Result<()> {
@@ -507,14 +456,6 @@ fn write_set(
         let contents = serialize_with_format(settings, format)?;
         fs::write(
             dir.join(format!("repo-settings.{}", format.ext())),
-            contents,
-        )?;
-    }
-
-    if let Some(bp) = bp {
-        let contents = serialize_with_format(bp, format)?;
-        fs::write(
-            dir.join(format!("branch-protection.{}", format.ext())),
             contents,
         )?;
     }

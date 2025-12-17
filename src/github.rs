@@ -180,6 +180,7 @@ impl GithubClient {
                 merge_commit_message_option: None,
                 squash_merge_option: None,
             }),
+            branch_protection: None,
         })
     }
 
@@ -411,9 +412,12 @@ impl GithubClient {
         repo: &str,
         pattern: &str,
     ) -> Result<Option<BranchProtectionRule>> {
+        let encoded_pattern =
+            percent_encoding::utf8_percent_encode(pattern, percent_encoding::NON_ALPHANUMERIC)
+                .to_string();
         let path = format!(
             "/repos/{}/{}/branches/{}/protection",
-            self.org, repo, pattern
+            self.org, repo, encoded_pattern
         );
         match self
             .inner
@@ -421,6 +425,13 @@ impl GithubClient {
             .await
         {
             Ok(data) => Ok(Some(map_branch_protection_response(pattern, data))),
+            Err(octocrab::Error::Serde { .. }) => {
+                warn!(
+                    "could not parse branch protection for {}/{} ({}); skipping",
+                    self.org, repo, pattern
+                );
+                Ok(None)
+            }
             Err(octocrab::Error::GitHub { ref source, .. })
                 if source.status_code == reqwest::StatusCode::NOT_FOUND =>
             {
@@ -437,6 +448,31 @@ impl GithubClient {
             }
             Err(e) => Err(map_repo_error(&self.org, repo, e)),
         }
+    }
+
+    pub async fn list_branches(&self, repo: &str) -> Result<Vec<String>> {
+        let mut branches = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let resp = self
+                .inner
+                .repos(&self.org, repo)
+                .list_branches()
+                .per_page(100)
+                .page(page)
+                .send()
+                .await
+                .map_err(|e| map_repo_error(&self.org, repo, e))?;
+            if resp.items.is_empty() {
+                break;
+            }
+            branches.extend(resp.items.into_iter().map(|b| b.name));
+            if resp.next.is_none() {
+                break;
+            }
+            page += 1;
+        }
+        Ok(branches)
     }
 
     pub async fn set_branch_protection(

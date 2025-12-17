@@ -227,6 +227,7 @@ mod tests {
                 merge_commit_message_option: None,
                 squash_merge_option: None,
             }),
+            branch_protection: None,
         };
         let current = RepoSettings {
             pull_requests: Some(crate::settings::PullRequestSettings {
@@ -238,6 +239,7 @@ mod tests {
                 merge_commit_message_option: None,
                 squash_merge_option: None,
             }),
+            branch_protection: None,
         };
 
         let diff = diff_repo_settings(&desired, &current);
@@ -276,6 +278,7 @@ mod tests {
                     crate::settings::SquashMergeOption::PullRequestTitleAndDescription,
                 ),
             }),
+            branch_protection: None,
         };
         let current = RepoSettings {
             pull_requests: Some(crate::settings::PullRequestSettings {
@@ -287,6 +290,7 @@ mod tests {
                 merge_commit_message_option: None,
                 squash_merge_option: None,
             }),
+            branch_protection: None,
         };
 
         let diff = diff_repo_settings(&desired, &current);

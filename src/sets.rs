@@ -58,7 +58,6 @@ pub struct SetDefinition {
     pub labels: Vec<LabelSpec>,
     pub issue_templates: Vec<IssueTemplateFile>,
     pub repo_settings: Option<RepoSettings>,
-    pub branch_protection: Option<BranchProtectionConfig>,
     pub checks: Option<ChecksConfig>,
 }
 
@@ -100,8 +99,23 @@ pub fn load_set(base_dir: &Path, name: &str) -> Result<SetDefinition> {
     }
 
     let labels = load_labels_file(&path)?.unwrap_or_default();
-    let repo_settings = load_named_file::<RepoSettings>(&path, "repo-settings")?;
+    let mut repo_settings = load_named_file::<RepoSettings>(&path, "repo-settings")?;
     let branch_protection = load_named_file::<BranchProtectionConfig>(&path, "branch-protection")?;
+    if let Some(bp) = branch_protection {
+        match repo_settings {
+            Some(ref mut rs) => {
+                if rs.branch_protection.is_none() {
+                    rs.branch_protection = Some(bp);
+                }
+            }
+            None => {
+                repo_settings = Some(RepoSettings {
+                    branch_protection: Some(bp),
+                    ..Default::default()
+                });
+            }
+        }
+    }
     let checks = load_named_file::<ChecksConfig>(&path, "checks")?;
     let issue_templates = load_issue_templates(&path)?;
 
@@ -111,7 +125,6 @@ pub fn load_set(base_dir: &Path, name: &str) -> Result<SetDefinition> {
         labels,
         issue_templates,
         repo_settings,
-        branch_protection,
         checks,
     })
 }

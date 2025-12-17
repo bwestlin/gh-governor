@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct RepoSettings {
     #[serde(default)]
     pub pull_requests: Option<PullRequestSettings>,
+    #[serde(default)]
+    pub branch_protection: Option<BranchProtectionConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

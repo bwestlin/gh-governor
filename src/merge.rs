@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::sets::{ChecksConfig, IssueTemplateFile, LabelSpec, SetDefinition};
-use crate::settings::{BranchProtectionConfig, RepoSettings};
+use crate::settings::RepoSettings;
 
 #[derive(Debug, Error)]
 pub enum MergeError {
@@ -22,7 +22,6 @@ pub struct MergedRepoConfig {
     pub labels: Vec<LabelSpec>,
     pub issue_templates: Vec<IssueTemplateFile>,
     pub repo_settings: Option<RepoSettings>,
-    pub branch_protection: Option<BranchProtectionConfig>,
     pub checks: Option<ChecksConfig>,
 }
 
@@ -30,7 +29,6 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
     let mut labels = HashMap::new();
     let mut templates = HashMap::new();
     let mut repo_settings: Option<RepoSettings> = None;
-    let mut branch_protection: Option<BranchProtectionConfig> = None;
     let mut checks: Option<ChecksConfig> = None;
 
     for set in sets {
@@ -61,11 +59,6 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
             repo_settings = merge_or_conflict(repo_settings, settings.clone(), "repo settings")?;
         }
 
-        if let Some(bp) = &set.branch_protection {
-            branch_protection =
-                merge_or_conflict(branch_protection, bp.clone(), "branch protection")?;
-        }
-
         if let Some(chk) = &set.checks {
             checks = merge_or_conflict(checks, chk.clone(), "checks")?;
         }
@@ -83,7 +76,6 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
             v
         },
         repo_settings,
-        branch_protection,
         checks,
     })
 }
@@ -112,7 +104,6 @@ mod tests {
             labels: Vec::new(),
             issue_templates: Vec::new(),
             repo_settings: None,
-            branch_protection: None,
             checks: None,
         }
     }

@@ -292,37 +292,51 @@ async fn handle_repos(
                 }
 
                 let mut pr_status = "no PR (no .github file changes)".to_string();
-                if let Some(branch) = branch_name.clone() {
+                if let Some(branch) = branch_name.as_deref() {
                     let pr_title =
                         format!("gh-governor updates ({})", Utc::now().format("%Y-%m-%d"));
                     let pr_body = Some("Automated .github updates via gh-governor");
-                    if let Some(pr) = existing_pr {
+                    let mut pr_opt = existing_pr;
+                    if let Some(pr) = pr_opt.as_ref() {
                         if pr.title.as_deref() != Some(&pr_title) || pr.body.as_deref() != pr_body {
                             gh.update_pull_request(&repo_name, pr.number, &pr_title, pr_body)
                                 .await?;
                         }
-                        pr_status = if any_file_changes {
-                            format!(
-                                "update existing draft PR #{} ({} -> {})",
-                                pr.number, branch, base_branch
-                            )
-                        } else {
-                            format!(
-                                "existing draft PR #{} already up to date ({} -> {})",
-                                pr.number, branch, base_branch
-                            )
-                        };
-                    } else {
+                    }
+                    if pr_opt.is_none() && any_file_changes {
                         gh.create_pull_request(
                             &repo_name,
                             &pr_title,
-                            &branch,
+                            branch,
                             &base_branch,
                             pr_body,
                             true,
                         )
                         .await?;
-                        pr_status = format!("create draft PR ({} -> {})", branch, base_branch);
+                        pr_opt = gh
+                            .find_open_pr_by_head_prefix(&repo_name, PR_BRANCH_PREFIX, &base_branch)
+                            .await?;
+                    }
+                    if let Some(pr) = pr_opt {
+                        let url =
+                            pr.html_url
+                                .as_ref()
+                                .map(|u| u.to_string())
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "https://github.com/{}/{}/pull/{}",
+                                        gh.org, repo_name, pr.number
+                                    )
+                                });
+                        pr_status = format!(
+                            "draft PR #{} ({} -> {}) [{}]",
+                            pr.number, branch, base_branch, url
+                        );
+                    } else {
+                        pr_status = format!(
+                            "no PR created for branch '{}' (no changes to apply)",
+                            branch
+                        );
                     }
                 }
 
@@ -358,40 +372,6 @@ async fn handle_repos(
                     ),
                     format_label_lines(&removable, ColorKind::Remove),
                 );
-
-                if let Some(branch) = branch_name {
-                    let pr_title =
-                        format!("gh-governor updates ({})", Utc::now().format("%Y-%m-%d"));
-                    let pr_body = Some("Automated .github updates via gh-governor");
-                    if let Some(pr) = gh
-                        .find_open_pr_by_head_prefix(&repo_name, &branch, &base_branch)
-                        .await?
-                    {
-                        // Update title/body if they differ
-                        if pr.title.as_deref() != Some(&pr_title) || pr.body.as_deref() != pr_body {
-                            gh.update_pull_request(&repo_name, pr.number, &pr_title, pr_body)
-                                .await?;
-                        }
-                        println!(
-                            "Repo {} (apply): reusing existing PR #{} from '{}' to '{}'",
-                            repo_name, pr.number, branch, base_branch
-                        );
-                    } else {
-                        gh.create_pull_request(
-                            &repo_name,
-                            &pr_title,
-                            &branch,
-                            &base_branch,
-                            pr_body,
-                            true,
-                        )
-                        .await?;
-                        println!(
-                            "Repo {} (apply): opened draft PR '{}' from '{}' to '{}'",
-                            repo_name, pr_title, branch, base_branch
-                        );
-                    }
-                }
             }
         }
     }

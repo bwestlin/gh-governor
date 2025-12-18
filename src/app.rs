@@ -297,12 +297,6 @@ async fn handle_repos(
                         format!("gh-governor updates ({})", Utc::now().format("%Y-%m-%d"));
                     let pr_body = Some("Automated .github updates via gh-governor");
                     let mut pr_opt = existing_pr;
-                    if let Some(pr) = pr_opt.as_ref() {
-                        if pr.title.as_deref() != Some(&pr_title) || pr.body.as_deref() != pr_body {
-                            gh.update_pull_request(&repo_name, pr.number, &pr_title, pr_body)
-                                .await?;
-                        }
-                    }
                     if pr_opt.is_none() && any_file_changes {
                         gh.create_pull_request(
                             &repo_name,

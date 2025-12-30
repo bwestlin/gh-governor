@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::sets::{ChecksConfig, IssueTemplateFile, LabelSpec, SetDefinition};
-use crate::settings::RepoSettings;
+use crate::settings::{
+    BranchProtectionRule, BranchRestrictions, RepoSettings, RequiredPullRequestReviews,
+    RequiredStatusChecks, ReviewDismissalRestrictions,
+};
 
 #[derive(Debug, Error)]
 pub enum MergeError {
@@ -99,19 +102,22 @@ fn merge_repo_settings(
                 _ => {}
             }
 
-            // Merge branch protection rules by pattern; conflict on differing rules.
+            // Merge branch protection rules by pattern; merge non-overlapping fields.
             match (&mut current.branch_protection, incoming.branch_protection) {
                 (None, Some(bp)) => current.branch_protection = Some(bp),
                 (Some(_), None) => {}
                 (Some(cur), Some(inc)) => {
                     for rule in inc.rules {
-                        match cur.rules.iter().find(|r| r.pattern == rule.pattern) {
-                            Some(existing_rule) if existing_rule != &rule => {
-                                return Err(MergeError::GenericConflict(
-                                    "repo settings (branch protection)".to_string(),
-                                ));
+                        match cur.rules.iter_mut().find(|r| r.pattern == rule.pattern) {
+                            Some(existing_rule) => {
+                                *existing_rule =
+                                    merge_branch_rule(existing_rule, rule).map_err(|e| {
+                                        MergeError::GenericConflict(format!(
+                                            "repo settings (branch protection): {}",
+                                            e
+                                        ))
+                                    })?;
                             }
-                            Some(_) => {}
                             None => cur.rules.push(rule),
                         }
                     }
@@ -124,6 +130,181 @@ fn merge_repo_settings(
     }
 }
 
+fn merge_branch_rule(
+    current: &BranchProtectionRule,
+    incoming: BranchProtectionRule,
+) -> Result<BranchProtectionRule, String> {
+    if current.pattern != incoming.pattern {
+        return Err("pattern mismatch".to_string());
+    }
+    let mut merged = current.clone();
+
+    merged.required_status_checks = merge_optional(
+        merged.required_status_checks,
+        incoming.required_status_checks,
+        merge_required_status_checks,
+        "required_status_checks",
+    )?;
+    merged.required_pull_request_reviews = merge_optional(
+        merged.required_pull_request_reviews,
+        incoming.required_pull_request_reviews,
+        merge_required_pull_request_reviews,
+        "required_pull_request_reviews",
+    )?;
+    merged.enforce_admins = merge_option_field(
+        merged.enforce_admins,
+        incoming.enforce_admins,
+        "enforce_admins",
+    )?;
+    merged.restrictions = merge_optional(
+        merged.restrictions,
+        incoming.restrictions,
+        merge_branch_restrictions,
+        "restrictions",
+    )?;
+    merged.allow_force_pushes = merge_option_field(
+        merged.allow_force_pushes,
+        incoming.allow_force_pushes,
+        "allow_force_pushes",
+    )?;
+    merged.allow_deletions = merge_option_field(
+        merged.allow_deletions,
+        incoming.allow_deletions,
+        "allow_deletions",
+    )?;
+    merged.block_creations = merge_option_field(
+        merged.block_creations,
+        incoming.block_creations,
+        "block_creations",
+    )?;
+    merged.require_linear_history = merge_option_field(
+        merged.require_linear_history,
+        incoming.require_linear_history,
+        "require_linear_history",
+    )?;
+    merged.required_conversation_resolution = merge_option_field(
+        merged.required_conversation_resolution,
+        incoming.required_conversation_resolution,
+        "required_conversation_resolution",
+    )?;
+    merged.required_signatures = merge_option_field(
+        merged.required_signatures,
+        incoming.required_signatures,
+        "required_signatures",
+    )?;
+
+    Ok(merged)
+}
+
+fn merge_required_status_checks(
+    current: RequiredStatusChecks,
+    incoming: RequiredStatusChecks,
+) -> Result<RequiredStatusChecks, String> {
+    Ok(RequiredStatusChecks {
+        strict: merge_option_field(current.strict, incoming.strict, "strict")?,
+        contexts: merge_option_vec(current.contexts, incoming.contexts, "contexts")?,
+        checks: merge_option_vec(current.checks, incoming.checks, "checks")?,
+    })
+}
+
+fn merge_required_pull_request_reviews(
+    current: RequiredPullRequestReviews,
+    incoming: RequiredPullRequestReviews,
+) -> Result<RequiredPullRequestReviews, String> {
+    Ok(RequiredPullRequestReviews {
+        dismiss_stale_reviews: merge_option_field(
+            current.dismiss_stale_reviews,
+            incoming.dismiss_stale_reviews,
+            "dismiss_stale_reviews",
+        )?,
+        require_code_owner_reviews: merge_option_field(
+            current.require_code_owner_reviews,
+            incoming.require_code_owner_reviews,
+            "require_code_owner_reviews",
+        )?,
+        required_approving_review_count: merge_option_field(
+            current.required_approving_review_count,
+            incoming.required_approving_review_count,
+            "required_approving_review_count",
+        )?,
+        require_last_push_approval: merge_option_field(
+            current.require_last_push_approval,
+            incoming.require_last_push_approval,
+            "require_last_push_approval",
+        )?,
+        dismissal_restrictions: merge_optional(
+            current.dismissal_restrictions,
+            incoming.dismissal_restrictions,
+            merge_review_dismissal_restrictions,
+            "dismissal_restrictions",
+        )?,
+    })
+}
+
+fn merge_review_dismissal_restrictions(
+    current: ReviewDismissalRestrictions,
+    incoming: ReviewDismissalRestrictions,
+) -> Result<ReviewDismissalRestrictions, String> {
+    Ok(ReviewDismissalRestrictions {
+        users: merge_option_vec(current.users, incoming.users, "users")?,
+        teams: merge_option_vec(current.teams, incoming.teams, "teams")?,
+    })
+}
+
+fn merge_branch_restrictions(
+    current: BranchRestrictions,
+    incoming: BranchRestrictions,
+) -> Result<BranchRestrictions, String> {
+    Ok(BranchRestrictions {
+        users: merge_option_vec(current.users, incoming.users, "users")?,
+        teams: merge_option_vec(current.teams, incoming.teams, "teams")?,
+        apps: merge_option_vec(current.apps, incoming.apps, "apps")?,
+    })
+}
+
+fn merge_option_field<T: PartialEq + Copy>(
+    current: Option<T>,
+    incoming: Option<T>,
+    field: &str,
+) -> Result<Option<T>, String> {
+    match (current, incoming) {
+        (None, v) => Ok(v),
+        (v, None) => Ok(v),
+        (Some(a), Some(b)) if a == b => Ok(Some(a)),
+        (Some(_), Some(_)) => Err(format!("conflict on {}", field)),
+    }
+}
+
+fn merge_option_vec<T: PartialEq>(
+    current: Option<Vec<T>>,
+    incoming: Option<Vec<T>>,
+    field: &str,
+) -> Result<Option<Vec<T>>, String> {
+    match (current, incoming) {
+        (None, v) => Ok(v),
+        (v, None) => Ok(v),
+        (Some(a), Some(b)) if a == b => Ok(Some(a)),
+        (Some(_), Some(_)) => Err(format!("conflict on {}", field)),
+    }
+}
+
+fn merge_optional<T, F>(
+    current: Option<T>,
+    incoming: Option<T>,
+    merge: F,
+    field: &str,
+) -> Result<Option<T>, String>
+where
+    F: Fn(T, T) -> Result<T, String>,
+{
+    match (current, incoming) {
+        (None, v) => Ok(v),
+        (v, None) => Ok(v),
+        (Some(a), Some(b)) => merge(a, b)
+            .map(Some)
+            .map_err(|e| format!("{}: {}", field, e)),
+    }
+}
 fn merge_or_conflict<T: PartialEq>(
     existing: Option<T>,
     incoming: T,

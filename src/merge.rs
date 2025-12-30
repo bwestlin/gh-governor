@@ -56,7 +56,7 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
         }
 
         if let Some(settings) = &set.repo_settings {
-            repo_settings = merge_or_conflict(repo_settings, settings.clone(), "repo settings")?;
+            repo_settings = merge_repo_settings(repo_settings, settings.clone())?;
         }
 
         if let Some(chk) = &set.checks {
@@ -78,6 +78,50 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
         repo_settings,
         checks,
     })
+}
+
+fn merge_repo_settings(
+    existing: Option<RepoSettings>,
+    incoming: RepoSettings,
+) -> MergeResult<Option<RepoSettings>> {
+    match existing {
+        None => Ok(Some(incoming)),
+        Some(mut current) => {
+            // Merge pull request settings only if they don't conflict.
+            match (&current.pull_requests, &incoming.pull_requests) {
+                (None, Some(pr)) => current.pull_requests = Some(pr.clone()),
+                (Some(_), None) => {}
+                (Some(a), Some(b)) if a != b => {
+                    return Err(MergeError::GenericConflict(
+                        "repo settings (pull requests)".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+
+            // Merge branch protection rules by pattern; conflict on differing rules.
+            match (&mut current.branch_protection, incoming.branch_protection) {
+                (None, Some(bp)) => current.branch_protection = Some(bp),
+                (Some(_), None) => {}
+                (Some(cur), Some(inc)) => {
+                    for rule in inc.rules {
+                        match cur.rules.iter().find(|r| r.pattern == rule.pattern) {
+                            Some(existing_rule) if existing_rule != &rule => {
+                                return Err(MergeError::GenericConflict(
+                                    "repo settings (branch protection)".to_string(),
+                                ));
+                            }
+                            Some(_) => {}
+                            None => cur.rules.push(rule),
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            Ok(Some(current))
+        }
+    }
 }
 
 fn merge_or_conflict<T: PartialEq>(

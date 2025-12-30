@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use crate::sets::{ChecksConfig, IssueTemplateFile, LabelSpec, SetDefinition};
+use crate::sets::{ChecksConfig, GithubFile, LabelSpec, SetDefinition};
 use crate::settings::{
     BranchProtectionRule, BranchRestrictions, RepoSettings, RequiredPullRequestReviews,
     RequiredStatusChecks, ReviewDismissalRestrictions,
@@ -12,7 +12,7 @@ use crate::settings::{
 pub enum MergeError {
     #[error("label conflict for '{0}' between sets; definitions differ")]
     LabelConflict(String),
-    #[error("issue template conflict for '{0}' between sets")]
+    #[error(".github file conflict for '{0}' between sets")]
     TemplateConflict(String),
     #[error("{0} conflict between sets")]
     GenericConflict(String),
@@ -23,14 +23,14 @@ pub type MergeResult<T> = Result<T, MergeError>;
 #[derive(Debug, Clone)]
 pub struct MergedRepoConfig {
     pub labels: Vec<LabelSpec>,
-    pub issue_templates: Vec<IssueTemplateFile>,
+    pub github_files: Vec<GithubFile>,
     pub repo_settings: Option<RepoSettings>,
     pub checks: Option<ChecksConfig>,
 }
 
 pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConfig> {
     let mut labels = HashMap::new();
-    let mut templates = HashMap::new();
+    let mut github_files = HashMap::new();
     let mut repo_settings: Option<RepoSettings> = None;
     let mut checks: Option<ChecksConfig> = None;
 
@@ -46,14 +46,14 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
             }
         }
 
-        for template in &set.issue_templates {
-            match templates.get(&template.path) {
-                Some(existing) if existing != template => {
-                    return Err(MergeError::TemplateConflict(template.path.clone()));
+        for file in &set.github_files {
+            match github_files.get(&file.path) {
+                Some(existing) if existing != file => {
+                    return Err(MergeError::TemplateConflict(file.path.clone()));
                 }
                 Some(_) => {}
                 None => {
-                    templates.insert(template.path.clone(), template.clone());
+                    github_files.insert(file.path.clone(), file.clone());
                 }
             }
         }
@@ -73,8 +73,8 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
             v.sort_by(|a, b| a.name.cmp(&b.name));
             v
         },
-        issue_templates: {
-            let mut v: Vec<_> = templates.into_values().collect();
+        github_files: {
+            let mut v: Vec<_> = github_files.into_values().collect();
             v.sort_by(|a, b| a.path.cmp(&b.path));
             v
         },
@@ -320,14 +320,14 @@ fn merge_or_conflict<T: PartialEq>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sets::{IssueTemplateFile, SetDefinition};
+    use crate::sets::{GithubFile, SetDefinition};
 
     fn base_set(name: &str) -> SetDefinition {
         SetDefinition {
             name: name.to_string(),
             path: "".into(),
             labels: Vec::new(),
-            issue_templates: Vec::new(),
+            github_files: Vec::new(),
             repo_settings: None,
             checks: None,
         }
@@ -374,12 +374,12 @@ mod tests {
     #[test]
     fn detects_template_conflict() {
         let mut a = base_set("a");
-        a.issue_templates.push(IssueTemplateFile {
+        a.github_files.push(GithubFile {
             path: ".github/ISSUE_TEMPLATE/bug.yml".to_string(),
             contents: "a".to_string(),
         });
         let mut b = base_set("b");
-        b.issue_templates.push(IssueTemplateFile {
+        b.github_files.push(GithubFile {
             path: ".github/ISSUE_TEMPLATE/bug.yml".to_string(),
             contents: "b".to_string(),
         });
@@ -392,16 +392,16 @@ mod tests {
     #[test]
     fn allows_identical_templates() {
         let mut a = base_set("a");
-        a.issue_templates.push(IssueTemplateFile {
+        a.github_files.push(GithubFile {
             path: ".github/ISSUE_TEMPLATE/bug.yml".to_string(),
             contents: "same".to_string(),
         });
         let mut b = base_set("b");
-        b.issue_templates.push(IssueTemplateFile {
+        b.github_files.push(GithubFile {
             path: ".github/ISSUE_TEMPLATE/bug.yml".to_string(),
             contents: "same".to_string(),
         });
         let merged = merge_sets_for_repo(&[a, b]).unwrap();
-        assert_eq!(merged.issue_templates.len(), 1);
+        assert_eq!(merged.github_files.len(), 1);
     }
 }

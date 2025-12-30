@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::config::{RepoConfig, RootConfig};
 use crate::error::Result;
 use crate::github::GithubClient;
-use crate::sets::{IssueTemplateFile, LabelSpec};
+use crate::sets::{GithubFile, LabelSpec};
 use crate::settings::RepoSettings;
 
 #[derive(Clone)]
@@ -14,7 +14,7 @@ struct RepoSnapshot {
     name: String,
     labels: Vec<LabelSpec>,
     settings: Option<RepoSettings>,
-    templates: Vec<IssueTemplateFile>,
+    templates: Vec<GithubFile>,
 }
 
 fn group_signatures<T: Serialize + Clone>(
@@ -224,7 +224,7 @@ async fn fetch_repo(gh: &GithubClient, repo: &str) -> Result<RepoSnapshot> {
         .unwrap_or_default();
     for path in paths {
         if let Some(file) = gh.get_file(repo, &path, Some(&default_branch)).await? {
-            templates.push(IssueTemplateFile {
+            templates.push(GithubFile {
                 path,
                 contents: file.content,
             });
@@ -277,7 +277,7 @@ fn compute_common_settings(snapshots: &[RepoSnapshot]) -> Option<RepoSettings> {
     }
 }
 
-fn compute_common_templates(snapshots: &[RepoSnapshot]) -> Vec<IssueTemplateFile> {
+fn compute_common_templates(snapshots: &[RepoSnapshot]) -> Vec<GithubFile> {
     if snapshots.is_empty() {
         return Vec::new();
     }
@@ -291,18 +291,15 @@ fn compute_common_templates(snapshots: &[RepoSnapshot]) -> Vec<IssueTemplateFile
             common_map.insert(tpl.path.clone(), tpl.contents.clone());
         }
     }
-    let mut common: Vec<IssueTemplateFile> = common_map
+    let mut common: Vec<GithubFile> = common_map
         .into_iter()
-        .map(|(path, contents)| IssueTemplateFile { path, contents })
+        .map(|(path, contents)| GithubFile { path, contents })
         .collect();
     common.sort_by(|a, b| a.path.cmp(&b.path));
     common
 }
 
-fn ensure_config_for_templates(
-    templates: &mut Vec<IssueTemplateFile>,
-    base_config: Option<&IssueTemplateFile>,
-) {
+fn ensure_config_for_templates(templates: &mut Vec<GithubFile>, base_config: Option<&GithubFile>) {
     let has_config = templates
         .iter()
         .any(|t| t.path.ends_with(".github/ISSUE_TEMPLATE/config.yml"));
@@ -350,7 +347,7 @@ fn ensure_config_for_templates(
     }
     cfg.issue_templates = None;
     if let Ok(contents) = serde_yaml::to_string(&cfg) {
-        templates.push(IssueTemplateFile {
+        templates.push(GithubFile {
             path: ".github/ISSUE_TEMPLATE/config.yml".to_string(),
             contents,
         });
@@ -431,7 +428,7 @@ fn write_set(
     dir: &Path,
     labels: &[LabelSpec],
     settings: Option<&RepoSettings>,
-    templates: &[IssueTemplateFile],
+    templates: &[GithubFile],
     format: OutputFormat,
 ) -> Result<()> {
     fs::create_dir_all(dir)?;

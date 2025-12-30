@@ -19,7 +19,7 @@ pub struct LabelSpec {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct IssueTemplateFile {
+pub struct GithubFile {
     pub path: String,
     pub contents: String,
 }
@@ -56,7 +56,7 @@ pub struct SetDefinition {
     pub name: String,
     pub path: PathBuf,
     pub labels: Vec<LabelSpec>,
-    pub issue_templates: Vec<IssueTemplateFile>,
+    pub github_files: Vec<GithubFile>,
     pub repo_settings: Option<RepoSettings>,
     pub checks: Option<ChecksConfig>,
 }
@@ -117,40 +117,41 @@ pub fn load_set(base_dir: &Path, name: &str) -> Result<SetDefinition> {
         }
     }
     let checks = load_named_file::<ChecksConfig>(&path, "checks")?;
-    let issue_templates = load_issue_templates(&path)?;
+    let github_files = load_github_files(&path)?;
 
     Ok(SetDefinition {
         name: name.to_string(),
         path,
         labels,
-        issue_templates,
+        github_files,
         repo_settings,
         checks,
     })
 }
 
-fn load_issue_templates(set_path: &Path) -> Result<Vec<IssueTemplateFile>> {
-    let mut templates = Vec::new();
-    let template_dir = set_path.join(".github").join("ISSUE_TEMPLATE");
-    for ext in ["yml", "yaml"] {
-        let pattern = template_dir.join(format!("*.{ext}"));
-        for entry in glob(pattern.to_str().unwrap_or_default())? {
-            let path = entry.map_err(Error::GlobGlob)?;
-            let contents =
-                fs::read_to_string(&path).map_err(|e| Error::io_with_path(e, path.clone()))?;
-            let mut rel = path.to_string_lossy().to_string();
-            if let Some(idx) = rel.find(".github/") {
-                rel = rel[idx..].to_string();
-            } else if let Ok(stripped) = path.strip_prefix(set_path) {
-                rel = stripped.to_string_lossy().to_string();
-            }
-            templates.push(IssueTemplateFile {
-                path: rel,
-                contents,
-            });
+fn load_github_files(set_path: &Path) -> Result<Vec<GithubFile>> {
+    let mut files = Vec::new();
+    let github_dir = set_path.join(".github");
+    let pattern = github_dir.join("**").join("*");
+    for entry in glob(pattern.to_str().unwrap_or_default())? {
+        let path = entry.map_err(Error::GlobGlob)?;
+        if !path.is_file() {
+            continue;
         }
+        let contents =
+            fs::read_to_string(&path).map_err(|e| Error::io_with_path(e, path.clone()))?;
+        let mut rel = path.to_string_lossy().to_string();
+        if let Some(idx) = rel.find(".github/") {
+            rel = rel[idx..].to_string();
+        } else if let Ok(stripped) = path.strip_prefix(set_path) {
+            rel = stripped.to_string_lossy().to_string();
+        }
+        files.push(GithubFile {
+            path: rel,
+            contents,
+        });
     }
-    Ok(templates)
+    Ok(files)
 }
 
 fn load_labels_file(dir: &Path) -> Result<Option<Vec<LabelSpec>>> {

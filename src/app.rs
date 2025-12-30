@@ -10,7 +10,7 @@ use crate::diff::{RepoSettingsDiff, diff_labels, diff_repo_settings};
 use crate::error::Result;
 use crate::github::{GithubClient, LabelUsageEntry};
 use crate::merge::{MergedRepoConfig, merge_sets_for_repo};
-use crate::sets::{IssueTemplateFile, LabelSpec, SetDefinition};
+use crate::sets::{GithubFile, LabelSpec, SetDefinition};
 use crate::settings::BranchProtectionRule;
 
 #[derive(Clone, Copy, Debug)]
@@ -85,28 +85,27 @@ async fn handle_repos(
             }
         }
 
-        let mut desired_templates: Vec<IssueTemplateFile> = merged_cfg
-            .issue_templates
+        let mut desired_files: Vec<GithubFile> = merged_cfg
+            .github_files
             .iter()
-            .filter(|t| !short_github_path(&t.path).ends_with("config.yml"))
+            .filter(|f| !short_github_path(&f.path).ends_with("config.yml"))
             .cloned()
             .collect();
-
-        if let Some(cfg) = build_issue_template_config(&merged_cfg.issue_templates) {
-            desired_templates.push(cfg);
+        if let Some(cfg) = build_issue_template_config(&merged_cfg.github_files) {
+            desired_files.push(cfg);
         }
 
-        let mut templates_add: Vec<IssueTemplateFile> = Vec::new();
-        let mut templates_update: Vec<(IssueTemplateFile, String)> = Vec::new();
-        let mut templates_remove: Vec<(String, String)> = Vec::new(); // (path, sha)
-        for tpl in &desired_templates {
+        let mut files_add: Vec<GithubFile> = Vec::new();
+        let mut files_update: Vec<(GithubFile, String)> = Vec::new();
+        let mut files_remove: Vec<(String, String)> = Vec::new(); // (path, sha)
+        for file in &desired_files {
             match gh
-                .get_file(&repo_name, &tpl.path, compare_branch.as_deref())
+                .get_file(&repo_name, &file.path, compare_branch.as_deref())
                 .await?
             {
-                None => templates_add.push(tpl.clone()),
-                Some(file) if file.content != tpl.contents => {
-                    templates_update.push((tpl.clone(), file.sha))
+                None => files_add.push(file.clone()),
+                Some(existing) if existing.content != file.contents => {
+                    files_update.push((file.clone(), existing.sha))
                 }
                 _ => {}
             }
@@ -117,23 +116,24 @@ async fn handle_repos(
                 .await
                 .unwrap_or_default();
             for path in current_paths {
-                if path.starts_with(".github/ISSUE_TEMPLATE/")
-                    && !desired_templates
-                        .iter()
-                        .any(|t| short_github_path(&t.path) == path)
+                if !path.starts_with(".github/ISSUE_TEMPLATE/") {
+                    continue;
+                }
+                if !desired_files
+                    .iter()
+                    .any(|f| short_github_path(&f.path) == path)
                 {
                     if let Some(file) = gh
                         .get_file(&repo_name, &path, compare_branch.as_deref())
                         .await?
                     {
-                        templates_remove.push((path, file.sha));
+                        files_remove.push((path, file.sha));
                     }
                 }
             }
         }
-        let any_file_changes = !templates_add.is_empty()
-            || !templates_update.is_empty()
-            || !templates_remove.is_empty();
+        let any_file_changes =
+            !files_add.is_empty() || !files_update.is_empty() || !files_remove.is_empty();
 
         let current_labels = gh.list_repo_labels(&repo_name).await?;
         let diff = diff_labels(&merged_cfg.labels, &current_labels);
@@ -192,18 +192,18 @@ async fn handle_repos(
                         .as_ref()
                         .map(|b| format!(" on branch '{}'\n", b))
                         .unwrap_or_else(String::new),
-                    format_count(templates_add.len(), ColorKind::Add),
-                    format_template_lines(&templates_add, ColorKind::Add),
-                    format_count(templates_update.len(), ColorKind::Update),
-                    format_template_lines(
-                        &templates_update
+                    format_count(files_add.len(), ColorKind::Add),
+                    format_github_lines(&files_add, ColorKind::Add),
+                    format_count(files_update.len(), ColorKind::Update),
+                    format_github_lines(
+                        &files_update
                             .iter()
                             .map(|(t, _)| t.clone())
                             .collect::<Vec<_>>(),
                         ColorKind::Update
                     ),
-                    format_count(templates_remove.len(), ColorKind::Remove),
-                    format_remove_lines(&templates_remove),
+                    format_count(files_remove.len(), ColorKind::Remove),
+                    format_remove_lines(&files_remove),
                     format_count(diff.to_add.len(), ColorKind::Add),
                     format_label_lines(&diff.to_add, ColorKind::Add),
                     format_count(diff.to_update.len(), ColorKind::Update),
@@ -225,7 +225,7 @@ async fn handle_repos(
                     gh.set_branch_protection(&repo_name, &bp.target).await?;
                 }
 
-                let any_file_changes = !templates_add.is_empty() || !templates_update.is_empty();
+                let any_file_changes = !files_add.is_empty() || !files_update.is_empty();
                 let existing_pr = if any_file_changes || existing_pr.is_some() {
                     gh.find_open_pr_by_head_prefix(&repo_name, PR_BRANCH_PREFIX, &base_branch)
                         .await?
@@ -244,31 +244,31 @@ async fn handle_repos(
                 };
 
                 if let Some(branch_ref) = branch_name.as_deref() {
-                    for tpl in &templates_add {
-                        let msg = format!("Add .github file {} via gh-governor", tpl.path);
+                    for file in &files_add {
+                        let msg = format!("Add .github file {} via gh-governor", file.path);
                         gh.put_file(
                             &repo_name,
-                            &tpl.path,
-                            &tpl.contents,
+                            &file.path,
+                            &file.contents,
                             None,
                             &msg,
                             Some(branch_ref),
                         )
                         .await?;
                     }
-                    for (tpl, sha) in &templates_update {
-                        let msg = format!("Update .github file {} via gh-governor", tpl.path);
+                    for (file, sha) in &files_update {
+                        let msg = format!("Update .github file {} via gh-governor", file.path);
                         gh.put_file(
                             &repo_name,
-                            &tpl.path,
-                            &tpl.contents,
+                            &file.path,
+                            &file.contents,
                             Some(sha.clone()),
                             &msg,
                             Some(branch_ref),
                         )
                         .await?;
                     }
-                    for (path, sha) in &templates_remove {
+                    for (path, sha) in &files_remove {
                         let msg = format!("Remove .github file {} via gh-governor", path);
                         gh.delete_file(&repo_name, path, sha, &msg, Some(branch_ref))
                             .await?;
@@ -345,18 +345,18 @@ async fn handle_repos(
                     bp_count,
                     bp_lines,
                     pr_status,
-                    format_count(templates_add.len(), ColorKind::Add),
-                    format_template_lines(&templates_add, ColorKind::Add),
-                    format_count(templates_update.len(), ColorKind::Update),
-                    format_template_lines(
-                        &templates_update
+                    format_count(files_add.len(), ColorKind::Add),
+                    format_github_lines(&files_add, ColorKind::Add),
+                    format_count(files_update.len(), ColorKind::Update),
+                    format_github_lines(
+                        &files_update
                             .iter()
                             .map(|(t, _)| t.clone())
                             .collect::<Vec<_>>(),
                         ColorKind::Update
                     ),
-                    format_count(templates_remove.len(), ColorKind::Remove),
-                    format_remove_lines(&templates_remove),
+                    format_count(files_remove.len(), ColorKind::Remove),
+                    format_remove_lines(&files_remove),
                     format_count(diff.to_add.len(), ColorKind::Add),
                     format_label_lines(&diff.to_add, ColorKind::Add),
                     format_count(diff.to_update.len(), ColorKind::Update),
@@ -431,16 +431,16 @@ fn format_label_lines(labels: &[LabelSpec], kind: ColorKind) -> String {
     out
 }
 
-fn format_template_lines(templates: &[IssueTemplateFile], kind: ColorKind) -> String {
-    if templates.is_empty() {
+fn format_github_lines(files: &[GithubFile], kind: ColorKind) -> String {
+    if files.is_empty() {
         return " none".to_string();
     }
     let mut out = String::new();
-    for tpl in templates {
+    for file in files {
         out.push('\n');
         out.push_str(&format!(
             "    - {}",
-            apply_color(&short_github_path(&tpl.path), kind)
+            apply_color(&short_github_path(&file.path), kind)
         ));
     }
     out
@@ -995,12 +995,19 @@ fn short_github_path(path: &str) -> String {
     }
 }
 
-fn build_issue_template_config(templates: &[IssueTemplateFile]) -> Option<IssueTemplateFile> {
-    let base = templates
+fn build_issue_template_config(files: &[GithubFile]) -> Option<GithubFile> {
+    let issue_files: Vec<&GithubFile> = files
+        .iter()
+        .filter(|f| short_github_path(&f.path).starts_with(".github/ISSUE_TEMPLATE/"))
+        .collect();
+    if issue_files.is_empty() {
+        return None;
+    }
+    let base = issue_files
         .iter()
         .find(|t| short_github_path(&t.path).ends_with("config.yml"));
 
-    let desired_templates: Vec<IssueTemplateEntry> = templates
+    let desired_templates: Vec<IssueTemplateEntry> = issue_files
         .iter()
         .filter(|t| !short_github_path(&t.path).ends_with("config.yml"))
         .map(|tpl| IssueTemplateEntry {
@@ -1021,7 +1028,7 @@ fn build_issue_template_config(templates: &[IssueTemplateFile]) -> Option<IssueT
     config.issue_templates = Some(desired_templates);
 
     let contents = serde_yaml::to_string(&config).unwrap_or_default();
-    Some(IssueTemplateFile {
+    Some(GithubFile {
         path: ".github/ISSUE_TEMPLATE/config.yml".to_string(),
         contents,
     })
@@ -1119,7 +1126,7 @@ fn prepare_merged(
             continue;
         }
 
-        if let Err(reason) = detect_template_conflicts(&set_defs) {
+        if let Err(reason) = detect_github_file_conflicts(&set_defs) {
             return Err(crate::error::Error::MergeConflict {
                 repo: repo.name.clone(),
                 reason,
@@ -1140,20 +1147,20 @@ fn prepare_merged(
     Ok(merged)
 }
 
-fn detect_template_conflicts(sets: &[SetDefinition]) -> std::result::Result<(), String> {
+fn detect_github_file_conflicts(sets: &[SetDefinition]) -> std::result::Result<(), String> {
     let mut seen: HashMap<String, (String, String)> = HashMap::new(); // normalized path -> (contents, set name)
     for set in sets {
-        for tpl in &set.issue_templates {
-            let key = short_github_path(&tpl.path);
+        for file in &set.github_files {
+            let key = short_github_path(&file.path);
             if let Some(existing) = seen.get(&key) {
-                if existing.0 != tpl.contents {
+                if existing.0 != file.contents {
                     return Err(format!(
                         "conflicting .github file '{}' between sets '{}' and '{}'",
                         key, existing.1, set.name
                     ));
                 }
             } else {
-                seen.insert(key, (tpl.contents.clone(), set.name.clone()));
+                seen.insert(key, (file.contents.clone(), set.name.clone()));
             }
         }
     }
@@ -1163,13 +1170,14 @@ fn detect_template_conflicts(sets: &[SetDefinition]) -> std::result::Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_yaml::Value;
 
     fn set_with_tpl(name: &str, path: &str, contents: &str) -> SetDefinition {
         SetDefinition {
             name: name.to_string(),
             path: PathBuf::new(),
             labels: Vec::new(),
-            issue_templates: vec![IssueTemplateFile {
+            github_files: vec![GithubFile {
                 path: path.to_string(),
                 contents: contents.to_string(),
             }],
@@ -1182,7 +1190,7 @@ mod tests {
     fn detects_template_conflict_between_sets() {
         let a = set_with_tpl("a", ".github/ISSUE_TEMPLATE/bug.yml", "one");
         let b = set_with_tpl("b", ".github/ISSUE_TEMPLATE/bug.yml", "two");
-        let err = detect_template_conflicts(&[a, b]).unwrap_err();
+        let err = detect_github_file_conflicts(&[a, b]).unwrap_err();
         assert!(err.contains(
             "conflicting .github file '.github/ISSUE_TEMPLATE/bug.yml' between sets 'a' and 'b'"
         ));
@@ -1192,18 +1200,18 @@ mod tests {
     fn allows_identical_templates_across_sets() {
         let a = set_with_tpl("a", ".github/ISSUE_TEMPLATE/bug.yml", "same");
         let b = set_with_tpl("b", ".github/ISSUE_TEMPLATE/bug.yml", "same");
-        assert!(detect_template_conflicts(&[a, b]).is_ok());
+        assert!(detect_github_file_conflicts(&[a, b]).is_ok());
     }
 
     #[test]
     fn builds_config_including_templates() {
         let templates = vec![
-            IssueTemplateFile {
+            GithubFile {
                 path: "example-conf/toml/config-sets/core/.github/ISSUE_TEMPLATE/bug.yml"
                     .to_string(),
                 contents: "name: Bug\ndescription: A bug\n".to_string(),
             },
-            IssueTemplateFile {
+            GithubFile {
                 path: ".github/ISSUE_TEMPLATE/feature.yml".to_string(),
                 contents: "name: Feature\n".to_string(),
             },
@@ -1212,5 +1220,41 @@ mod tests {
         assert_eq!(cfg.path, ".github/ISSUE_TEMPLATE/config.yml");
         assert!(cfg.contents.contains("bug.yml"));
         assert!(cfg.contents.contains("feature.yml"));
+    }
+
+    #[test]
+    fn config_yaml_rewrite_can_change_formatting_only() {
+        let existing = r#"contact_links:
+  - name: Support
+    url: https://example.com
+    about: Ask here
+blank_issues_enabled: false
+"#;
+        let expected = r#"contact_links:
+  - name: Support
+    url: https://example.com
+    about: Ask here
+blank_issues_enabled: false
+issue_templates:
+  - name: Bug
+    description: File a bug
+    file: bug.yml
+"#;
+
+        let templates = vec![
+            GithubFile {
+                path: ".github/ISSUE_TEMPLATE/config.yml".to_string(),
+                contents: existing.to_string(),
+            },
+            GithubFile {
+                path: ".github/ISSUE_TEMPLATE/bug.yml".to_string(),
+                contents: "name: Bug\ndescription: File a bug\n".to_string(),
+            },
+        ];
+        let cfg = build_issue_template_config(&templates).expect("config");
+        let expected_val: Value = serde_yaml::from_str(expected).expect("parse");
+        let new_val: Value = serde_yaml::from_str(&cfg.contents).expect("parse");
+        assert_eq!(expected_val, new_val);
+        assert_ne!(existing.trim(), cfg.contents.trim());
     }
 }

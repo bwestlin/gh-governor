@@ -78,6 +78,7 @@ async fn handle_repos(
                         } else {
                             ChangeAction::Create
                         },
+                        current,
                         target,
                     });
                 }
@@ -384,6 +385,7 @@ enum ColorKind {
 struct BranchProtectionChange {
     pattern: String,
     action: ChangeAction,
+    current: Option<BranchProtectionRule>,
     target: BranchProtectionRule,
 }
 
@@ -532,11 +534,10 @@ fn format_branch_protection(changes: &[BranchProtectionChange], verbose: bool) -
             apply_color(&change.pattern, ColorKind::Update),
             action
         ));
-        if verbose {
-            for detail in branch_rule_details(&change.target) {
-                out.push('\n');
-                out.push_str(&format!("      - {}", detail));
-            }
+        let diffs = branch_rule_diff(change.current.as_ref(), &change.target, verbose);
+        for detail in diffs {
+            out.push('\n');
+            out.push_str(&format!("      - {}", detail));
         }
     }
     (format_count(changes.len(), ColorKind::Update), out)
@@ -677,6 +678,313 @@ fn branch_rule_details(rule: &BranchProtectionRule) -> Vec<String> {
         }
     }
     lines
+}
+
+fn branch_rule_diff(
+    current: Option<&BranchProtectionRule>,
+    target: &BranchProtectionRule,
+    verbose: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if current.is_none() {
+        return if verbose {
+            branch_rule_details(target)
+        } else {
+            vec!["new rule".to_string()]
+        };
+    }
+    let current = current.expect("checked is_none");
+
+    diff_bool(
+        "status checks strict",
+        current
+            .required_status_checks
+            .as_ref()
+            .and_then(|s| s.strict),
+        target
+            .required_status_checks
+            .as_ref()
+            .and_then(|s| s.strict),
+        &mut lines,
+    );
+
+    diff_list(
+        "status contexts",
+        current
+            .required_status_checks
+            .as_ref()
+            .and_then(|s| s.contexts.as_ref()),
+        target
+            .required_status_checks
+            .as_ref()
+            .and_then(|s| s.contexts.as_ref()),
+        &mut lines,
+    );
+
+    diff_checks(
+        "status checks",
+        current
+            .required_status_checks
+            .as_ref()
+            .and_then(|s| s.checks.as_ref()),
+        target
+            .required_status_checks
+            .as_ref()
+            .and_then(|s| s.checks.as_ref()),
+        &mut lines,
+    );
+
+    let cur_pr = current.required_pull_request_reviews.as_ref();
+    let tgt_pr = target.required_pull_request_reviews.as_ref();
+    diff_bool(
+        "dismiss stale reviews",
+        cur_pr.and_then(|p| p.dismiss_stale_reviews),
+        tgt_pr.and_then(|p| p.dismiss_stale_reviews),
+        &mut lines,
+    );
+    diff_bool(
+        "require code owner reviews",
+        cur_pr.and_then(|p| p.require_code_owner_reviews),
+        tgt_pr.and_then(|p| p.require_code_owner_reviews),
+        &mut lines,
+    );
+    diff_u8(
+        "required approvals",
+        cur_pr.and_then(|p| p.required_approving_review_count),
+        tgt_pr.and_then(|p| p.required_approving_review_count),
+        &mut lines,
+    );
+    diff_bool(
+        "require last push approval",
+        cur_pr.and_then(|p| p.require_last_push_approval),
+        tgt_pr.and_then(|p| p.require_last_push_approval),
+        &mut lines,
+    );
+
+    diff_review_restrictions(
+        "dismissal restrictions",
+        cur_pr.and_then(|p| p.dismissal_restrictions.as_ref()),
+        tgt_pr.and_then(|p| p.dismissal_restrictions.as_ref()),
+        &mut lines,
+    );
+
+    diff_bool(
+        "enforce admins",
+        current.enforce_admins,
+        target.enforce_admins,
+        &mut lines,
+    );
+    diff_bool(
+        "allow force pushes",
+        current.allow_force_pushes,
+        target.allow_force_pushes,
+        &mut lines,
+    );
+    diff_bool(
+        "allow deletions",
+        current.allow_deletions,
+        target.allow_deletions,
+        &mut lines,
+    );
+    diff_bool(
+        "block creations",
+        current.block_creations,
+        target.block_creations,
+        &mut lines,
+    );
+    diff_bool(
+        "require linear history",
+        current.require_linear_history,
+        target.require_linear_history,
+        &mut lines,
+    );
+    diff_bool(
+        "require conversation resolution",
+        current.required_conversation_resolution,
+        target.required_conversation_resolution,
+        &mut lines,
+    );
+    diff_bool(
+        "require signatures",
+        current.required_signatures,
+        target.required_signatures,
+        &mut lines,
+    );
+
+    diff_restrictions(
+        "restrictions",
+        current.restrictions.as_ref(),
+        target.restrictions.as_ref(),
+        &mut lines,
+    );
+
+    if lines.is_empty() {
+        lines.push("no field-level changes detected".to_string());
+    }
+    lines
+}
+
+fn diff_bool(label: &str, cur: Option<bool>, tgt: Option<bool>, out: &mut Vec<String>) {
+    if cur == tgt {
+        return;
+    }
+    out.push(format!(
+        "{}: {} -> {}",
+        label,
+        cur.map(|v| v.to_string())
+            .unwrap_or_else(|| "unset".to_string()),
+        apply_color(
+            &tgt.map(|v| v.to_string())
+                .unwrap_or_else(|| "unset".to_string()),
+            ColorKind::Update
+        )
+    ));
+}
+
+fn diff_u8(label: &str, cur: Option<u8>, tgt: Option<u8>, out: &mut Vec<String>) {
+    if cur == tgt {
+        return;
+    }
+    out.push(format!(
+        "{}: {} -> {}",
+        label,
+        cur.map(|v| v.to_string())
+            .unwrap_or_else(|| "unset".to_string()),
+        apply_color(
+            &tgt.map(|v| v.to_string())
+                .unwrap_or_else(|| "unset".to_string()),
+            ColorKind::Update
+        )
+    ));
+}
+
+fn diff_list(
+    label: &str,
+    cur: Option<&Vec<String>>,
+    tgt: Option<&Vec<String>>,
+    out: &mut Vec<String>,
+) {
+    if cur == tgt {
+        return;
+    }
+    let cur_str = cur
+        .map(|v| v.join(", "))
+        .unwrap_or_else(|| "unset".to_string());
+    let tgt_str = tgt
+        .map(|v| v.join(", "))
+        .unwrap_or_else(|| "unset".to_string());
+    out.push(format!(
+        "{}: {} -> {}",
+        label,
+        cur_str,
+        apply_color(&tgt_str, ColorKind::Update)
+    ));
+}
+
+fn diff_checks(
+    label: &str,
+    cur: Option<&Vec<crate::settings::StatusCheck>>,
+    tgt: Option<&Vec<crate::settings::StatusCheck>>,
+    out: &mut Vec<String>,
+) {
+    if cur == tgt {
+        return;
+    }
+    let fmt = |checks: &Vec<crate::settings::StatusCheck>| {
+        checks
+            .iter()
+            .map(|c| {
+                if let Some(app) = c.app_id {
+                    format!("{} (app {})", c.context, app)
+                } else {
+                    c.context.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let cur_str = cur.map(fmt).unwrap_or_else(|| "unset".to_string());
+    let tgt_str = tgt.map(fmt).unwrap_or_else(|| "unset".to_string());
+    out.push(format!(
+        "{}: {} -> {}",
+        label,
+        cur_str,
+        apply_color(&tgt_str, ColorKind::Update)
+    ));
+}
+
+fn diff_restrictions(
+    label: &str,
+    cur: Option<&crate::settings::BranchRestrictions>,
+    tgt: Option<&crate::settings::BranchRestrictions>,
+    out: &mut Vec<String>,
+) {
+    if cur == tgt {
+        return;
+    }
+    let fmt = |r: &crate::settings::BranchRestrictions| {
+        let users = r.users.as_ref().map(|u| u.join(", ")).unwrap_or_default();
+        let teams = r.teams.as_ref().map(|t| t.join(", ")).unwrap_or_default();
+        let apps = r.apps.as_ref().map(|a| a.join(", ")).unwrap_or_default();
+        let mut parts = Vec::new();
+        if !users.is_empty() {
+            parts.push(format!("users [{}]", users));
+        }
+        if !teams.is_empty() {
+            parts.push(format!("teams [{}]", teams));
+        }
+        if !apps.is_empty() {
+            parts.push(format!("apps [{}]", apps));
+        }
+        if parts.is_empty() {
+            "unset".to_string()
+        } else {
+            parts.join("; ")
+        }
+    };
+    let cur_str = cur.map(fmt).unwrap_or_else(|| "unset".to_string());
+    let tgt_str = tgt.map(fmt).unwrap_or_else(|| "unset".to_string());
+    out.push(format!(
+        "{}: {} -> {}",
+        label,
+        cur_str,
+        apply_color(&tgt_str, ColorKind::Update)
+    ));
+}
+
+fn diff_review_restrictions(
+    label: &str,
+    cur: Option<&crate::settings::ReviewDismissalRestrictions>,
+    tgt: Option<&crate::settings::ReviewDismissalRestrictions>,
+    out: &mut Vec<String>,
+) {
+    if cur == tgt {
+        return;
+    }
+    let fmt = |r: &crate::settings::ReviewDismissalRestrictions| {
+        let users = r.users.as_ref().map(|u| u.join(", ")).unwrap_or_default();
+        let teams = r.teams.as_ref().map(|t| t.join(", ")).unwrap_or_default();
+        let mut parts = Vec::new();
+        if !users.is_empty() {
+            parts.push(format!("users [{}]", users));
+        }
+        if !teams.is_empty() {
+            parts.push(format!("teams [{}]", teams));
+        }
+        if parts.is_empty() {
+            "unset".to_string()
+        } else {
+            parts.join("; ")
+        }
+    };
+    let cur_str = cur.map(fmt).unwrap_or_else(|| "unset".to_string());
+    let tgt_str = tgt.map(fmt).unwrap_or_else(|| "unset".to_string());
+    out.push(format!(
+        "{}: {} -> {}",
+        label,
+        cur_str,
+        apply_color(&tgt_str, ColorKind::Update)
+    ));
 }
 
 fn short_github_path(path: &str) -> String {

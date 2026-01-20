@@ -1,0 +1,11 @@
+name: "\U0001F4D6 Docs request"
+description: Request or update documentation
+labels: ["docs", "triage"]
+body:
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What area of the docs needs attention?
+    validations:
+      required: true

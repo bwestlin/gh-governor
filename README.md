@@ -1,5 +1,39 @@
 # gh-governor
 
+## E2E Tests
+
+There exists a `e2e` binary to create repos from the config, seed them with an initial commit, run plan/apply, and verify the end state via the GitHub API (labels, repo settings, branch protection, and `.github` files). Logs are written to `target/e2e-logs`.
+
+**Prerequisites**
+
+- `GITHUB_TOKEN` is set and has admin rights in the test org.
+- Test org exists. Has been tested with: <https://github.com/orgs/bwestlin-testing>
+- `example-conf` contains `toml/`, `yml/`, `json/` sub-folders with valid configs.
+
+**Run**
+
+```sh
+cargo run --bin e2e -- \
+  --org bwestlin-testing \
+  --config-base example-conf/toml \
+  --logs target/e2e-logs \
+  run
+```
+
+**Cleanup**
+
+```sh
+cargo run --bin e2e -- \
+  --org bwestlin-testing \
+  --config-base example-conf/toml \
+  --logs target/e2e-logs \
+  cleanup
+```
+
+**Other formats**
+
+- Use `--config-base example-conf/yml` or `--config-base example-conf/json`.
+
 ## TODO
 
 - [ ] Fix PR flow for `.github` changes so apply always creates/updates a PR when there are file diffs.

@@ -582,6 +582,45 @@ impl GithubClient {
         }
     }
 
+    pub async fn create_repo(&self, name: &str, private: bool) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            name: &'a str,
+            private: bool,
+        }
+        let body = Body { name, private };
+        match self
+            .inner
+            ._post(format!("/orgs/{}/repos", self.org), Some(&body))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(octocrab::Error::GitHub { ref source, .. })
+                if source.status_code == reqwest::StatusCode::UNPROCESSABLE_ENTITY =>
+            {
+                // Repo probably exists; treat as success.
+                Ok(())
+            }
+            Err(e) => Err(Error::Octo(e)),
+        }
+    }
+
+    pub async fn delete_repo(&self, repo: &str) -> Result<()> {
+        match self
+            .inner
+            ._delete(format!("/repos/{}/{}", self.org, repo), None::<&()>)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(octocrab::Error::GitHub { ref source, .. })
+                if source.status_code == reqwest::StatusCode::NOT_FOUND =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+        }
+    }
+
     pub async fn find_open_pr_by_head_prefix(
         &self,
         repo: &str,

@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
@@ -11,6 +12,7 @@ use gh_governor::error::{Error, Result};
 use gh_governor::github::GithubClient;
 use gh_governor::merge::merge_sets_for_repo;
 use gh_governor::sets::SetDefinition;
+use tokio::time::sleep;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -52,7 +54,7 @@ async fn main() -> Result<()> {
         E2eCommand::Run => run_flow(&gh, &args).await,
         E2eCommand::Cleanup => {
             let repos = load_repo_names(&args.config_base)?;
-            cleanup(&gh, &repos).await
+            cleanup(&gh, &repos, &args.logs).await
         }
     }
 }
@@ -76,11 +78,83 @@ async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
     Ok(())
 }
 
-async fn cleanup(gh: &GithubClient, repos: &[String]) -> Result<()> {
+async fn cleanup(gh: &GithubClient, repos: &[String], logs: &Path) -> Result<()> {
+    let mut last_err: Option<Error> = None;
+    let mut failed_existing = Vec::new();
     for repo in repos {
-        gh.delete_repo(repo).await?;
+        match gh.get_repo(repo).await {
+            Ok(_) => match gh.delete_repo(repo).await {
+                Ok(()) => {
+                    if confirm_repo_deleted(gh, repo).await? {
+                        log(logs, &format!("Deleted repo {}", repo));
+                    } else {
+                        let msg = format!(
+                            "Delete requested for {}, but repo still exists (check permissions/org)",
+                            repo
+                        );
+                        log(logs, &msg);
+                        failed_existing.push(repo.clone());
+                    }
+                }
+                Err(err) => {
+                    let hint = cleanup_error_hint(&err);
+                    let msg = if let Some(hint) = hint {
+                        format!("Failed to delete {}: {} ({})", repo, err, hint)
+                    } else {
+                        format!("Failed to delete {}: {}", repo, err)
+                    };
+                    log(logs, &msg);
+                    last_err = Some(err);
+                }
+            },
+            Err(Error::RepoNotFound { .. }) => {
+                log(logs, &format!("Repo {} not found, skipping", repo));
+            }
+            Err(err) => {
+                let hint = cleanup_error_hint(&err);
+                let msg = if let Some(hint) = hint {
+                    format!("Failed to check repo {}: {} ({})", repo, err, hint)
+                } else {
+                    format!("Failed to check repo {}: {}", repo, err)
+                };
+                log(logs, &msg);
+                last_err = Some(err);
+            }
+        }
     }
-    Ok(())
+    if !failed_existing.is_empty() {
+        return Err(Error::InvalidArgs(format!(
+            "cleanup failed for {} repo(s) that still exist: {}. Ensure the token has the 'delete_repo' scope (classic PAT) or repo admin permissions with delete rights.",
+            failed_existing.len(),
+            failed_existing.join(", ")
+        )));
+    }
+    last_err.map_or(Ok(()), Err)
+}
+
+fn cleanup_error_hint(err: &Error) -> Option<&'static str> {
+    match err {
+        Error::Octo(octocrab::Error::GitHub { source, .. }) => {
+            if source.status_code == reqwest::StatusCode::FORBIDDEN
+                || source.status_code == reqwest::StatusCode::UNAUTHORIZED
+            {
+                return Some("token likely missing 'delete_repo' scope");
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+async fn confirm_repo_deleted(gh: &GithubClient, repo: &str) -> Result<bool> {
+    for _ in 0..3 {
+        match gh.get_repo(repo).await {
+            Ok(_) => sleep(Duration::from_millis(500)).await,
+            Err(Error::RepoNotFound { .. }) => return Ok(true),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(false)
 }
 
 async fn create_repos(gh: &GithubClient, repos: &[String], logs: &Path) -> Result<()> {
@@ -110,13 +184,15 @@ async fn seed_repos(gh: &GithubClient, repos: &[String], logs: &Path) -> Result<
     Ok(())
 }
 
-fn run_governor(
-    logs: &Path,
-    mode: &str,
-    config_base: &Path,
-    log_path: &Path,
-) -> Result<()> {
-    log(logs, &format!("Running gh-governor {} for config {}", mode, config_base.display()));
+fn run_governor(logs: &Path, mode: &str, config_base: &Path, log_path: &Path) -> Result<()> {
+    log(
+        logs,
+        &format!(
+            "Running gh-governor {} for config {}",
+            mode,
+            config_base.display()
+        ),
+    );
     let mut cmd = Command::new("cargo");
     cmd.args(["run", "--quiet", "--bin", "gh-governor", "--"])
         .arg("-v")

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -46,7 +47,9 @@ pub async fn run(
         root_path.display()
     );
 
-    handle_repos(mode, &gh, merged, verbose).await
+    let oauth_scopes = gh.oauth_scopes().await?;
+    let scope_set = oauth_scopes.map(|scopes| scopes.into_iter().collect::<HashSet<String>>());
+    handle_repos(mode, &gh, merged, verbose, scope_set.as_ref()).await
 }
 
 async fn handle_repos(
@@ -54,6 +57,7 @@ async fn handle_repos(
     gh: &GithubClient,
     merged: Vec<(String, MergedRepoConfig)>,
     verbose: bool,
+    oauth_scopes: Option<&HashSet<String>>,
 ) -> Result<()> {
     for (repo_name, merged_cfg) in merged {
         let repo_info = gh.get_repo(&repo_name).await?;
@@ -73,6 +77,15 @@ async fn handle_repos(
             .find_open_pr_by_head_prefix(&repo_name, PR_BRANCH_PREFIX, &base_branch)
             .await?;
         let compare_branch = existing_pr.as_ref().map(|pr| pr.head.ref_field.clone());
+
+        let has_workflow_files = merged_cfg
+            .github_files
+            .iter()
+            .any(|file| short_github_path(&file.path).starts_with(".github/workflows/"));
+        let missing_workflow_scope = has_workflow_files
+            && oauth_scopes
+                .map(|scopes| !scopes.contains("workflow"))
+                .unwrap_or(false);
 
         let mut bp_changes: Vec<BranchProtectionChange> = Vec::new();
         if let Some(cfg) = desired_settings.and_then(|s| s.branch_protection.as_ref()) {
@@ -157,6 +170,11 @@ async fn handle_repos(
 
         match mode {
             Mode::Plan => {
+                let workflow_warning = if missing_workflow_scope {
+                    "    Warning: token missing 'workflow' scope; .github/workflows updates will fail\n"
+                } else {
+                    ""
+                };
                 let branch_candidate = format!("{PR_BRANCH_PREFIX}{base_branch}");
                 let branch_blocked = if any_file_changes && existing_pr.is_none() {
                     gh.get_branch_sha_optional(&repo_name, &branch_candidate)
@@ -203,7 +221,7 @@ async fn handle_repos(
                     ("no PR (no .github file changes)".to_string(), None)
                 };
                 println!(
-                    "Repo {} (plan):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  PR:\n    {}{}\n    .github files add ({}) :{}\n    .github files update ({}) :{}\n    .github files remove ({}) :{}\n  Add labels ({}) :{}\n  Update labels ({}) :{}\n  Remove labels ({}) :{}\n  Blocked removals ({}) :{}",
+                    "Repo {} (plan):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  PR:\n    {}{}\n{}    .github files add ({}) :{}\n    .github files update ({}) :{}\n    .github files remove ({}) :{}\n  Add labels ({}) :{}\n  Update labels ({}) :{}\n  Remove labels ({}) :{}\n  Blocked removals ({}) :{}",
                     repo_name,
                     settings_count,
                     settings_lines,
@@ -214,6 +232,7 @@ async fn handle_repos(
                         .as_ref()
                         .map(|b| format!(" on branch '{}'", b))
                         .unwrap_or_else(String::new),
+                    workflow_warning,
                     format_count(files_add.len(), ColorKind::Add),
                     format_github_lines(&files_add, ColorKind::Add),
                     format_count(files_update.len(), ColorKind::Update),
@@ -237,6 +256,11 @@ async fn handle_repos(
                 );
             }
             Mode::Apply => {
+                let workflow_warning = if missing_workflow_scope {
+                    "    Warning: token missing 'workflow' scope; .github/workflows updates will fail\n"
+                } else {
+                    ""
+                };
                 if let (Some(diff_settings), Some(desired)) = (&settings_diff, desired_settings)
                     && !diff_settings.changes.is_empty()
                 {
@@ -381,13 +405,14 @@ async fn handle_repos(
                 let (settings_count, settings_lines) = format_repo_settings(settings_diff.as_ref());
                 let (bp_count, bp_lines) = format_branch_protection(&bp_changes, verbose);
                 println!(
-                    "Repo {} (apply):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  PR:\n    {}\n    .github files added ({}) :{}\n    .github files updated ({}) :{}\n    .github files removed ({}) :{}\n  Added labels ({}) :{}\n  Updated labels ({}) :{}\n  Removed labels ({}) :{}",
+                    "Repo {} (apply):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  PR:\n    {}\n{}    .github files added ({}) :{}\n    .github files updated ({}) :{}\n    .github files removed ({}) :{}\n  Added labels ({}) :{}\n  Updated labels ({}) :{}\n  Removed labels ({}) :{}",
                     repo_name,
                     settings_count,
                     settings_lines,
                     bp_count,
                     bp_lines,
                     pr_status,
+                    workflow_warning,
                     format_count(files_add.len(), ColorKind::Add),
                     format_github_lines(&files_add, ColorKind::Add),
                     format_count(files_update.len(), ColorKind::Update),

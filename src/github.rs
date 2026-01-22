@@ -54,6 +54,23 @@ impl GithubClient {
         Ok(Self { inner, org })
     }
 
+    pub async fn oauth_scopes(&self) -> Result<Option<Vec<String>>> {
+        let response = self.inner._get("/user").await.map_err(Error::from)?;
+        let header = response
+            .headers()
+            .get("x-oauth-scopes")
+            .or_else(|| response.headers().get("X-OAuth-Scopes"));
+        let scopes = header.and_then(|value| value.to_str().ok()).map(|value| {
+            value
+                .split(',')
+                .map(|scope| scope.trim().to_string())
+                .filter(|scope| !scope.is_empty())
+                .collect::<Vec<String>>()
+        });
+        let _ = response.into_body().collect().await;
+        Ok(scopes)
+    }
+
     pub async fn get_repo(&self, repo: &str) -> Result<octocrab::models::Repository> {
         self.inner
             .repos(&self.org, repo)

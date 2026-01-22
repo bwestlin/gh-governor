@@ -1,4 +1,5 @@
 # AGENTS.md
+<!-- markdownlint-disable MD024 -->
 
 ## GENERAL
 

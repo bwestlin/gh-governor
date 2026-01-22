@@ -371,6 +371,7 @@ dependencies = [
  "clap",
  "glob",
  "http",
+ "http-body-util",
  "octocrab",
  "owo-colors",
  "percent-encoding",

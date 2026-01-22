@@ -398,6 +398,11 @@ fn run_governor(
     cmd.args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        if !token.is_empty() {
+            cmd.env("GITHUB_TOKEN", token);
+        }
+    }
 
     let status = run_command(logs, log_path, verbose, cmd, &cmd_line)?;
 

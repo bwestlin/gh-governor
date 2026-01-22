@@ -122,13 +122,11 @@ async fn handle_repos(
                 if !desired_files
                     .iter()
                     .any(|f| short_github_path(&f.path) == path)
-                {
-                    if let Some(file) = gh
+                    && let Some(file) = gh
                         .get_file(&repo_name, &path, compare_branch.as_deref())
                         .await?
-                    {
-                        files_remove.push((path, file.sha));
-                    }
+                {
+                    files_remove.push((path, file.sha));
                 }
             }
         }
@@ -215,10 +213,10 @@ async fn handle_repos(
                 );
             }
             Mode::Apply => {
-                if let (Some(diff_settings), Some(desired)) = (&settings_diff, desired_settings) {
-                    if !diff_settings.changes.is_empty() {
-                        gh.update_repo_settings(&repo_name, desired).await?;
-                    }
+                if let (Some(diff_settings), Some(desired)) = (&settings_diff, desired_settings)
+                    && !diff_settings.changes.is_empty()
+                {
+                    gh.update_repo_settings(&repo_name, desired).await?;
                 }
 
                 for bp in &bp_changes {
@@ -589,25 +587,21 @@ fn branch_rule_details(rule: &BranchProtectionRule) -> Vec<String> {
         if let Some(strict) = sc.strict {
             lines.push(format!("status checks strict: {}", strict));
         }
-        if let Some(ctx) = &sc.contexts {
-            if !ctx.is_empty() {
-                lines.push(format!("status contexts: {}", ctx.join(", ")));
-            }
+        if let Some(ctx) = &sc.contexts && !ctx.is_empty() {
+            lines.push(format!("status contexts: {}", ctx.join(", ")));
         }
-        if let Some(checks) = &sc.checks {
-            if !checks.is_empty() {
-                let list: Vec<String> = checks
-                    .iter()
-                    .map(|c| {
-                        if let Some(app) = c.app_id {
-                            format!("{} (app {})", c.context, app)
-                        } else {
-                            c.context.clone()
-                        }
-                    })
-                    .collect();
-                lines.push(format!("status checks: {}", list.join(", ")));
-            }
+        if let Some(checks) = &sc.checks && !checks.is_empty() {
+            let list: Vec<String> = checks
+                .iter()
+                .map(|c| {
+                    if let Some(app) = c.app_id {
+                        format!("{} (app {})", c.context, app)
+                    } else {
+                        c.context.clone()
+                    }
+                })
+                .collect();
+            lines.push(format!("status checks: {}", list.join(", ")));
         }
     }
     if let Some(pr) = &rule.required_pull_request_reviews {
@@ -1097,7 +1091,7 @@ struct TemplateFrontMatter {
 
 fn prepare_merged(
     root: &crate::config::RootConfig,
-    sets_dir: &PathBuf,
+    sets_dir: &Path,
     only_repos: &[String],
 ) -> Result<Vec<(String, MergedRepoConfig)>> {
     let mut set_cache: HashMap<String, SetDefinition> = HashMap::new();

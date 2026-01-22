@@ -80,14 +80,12 @@ pub fn diff_repo_settings(desired: &RepoSettings, current: &RepoSettings) -> Rep
     let current_pr = current.pull_requests.as_ref();
 
     let mut check = |field: &'static str, want: Option<bool>, have: Option<bool>| {
-        if let Some(target) = want {
-            if have != Some(target) {
-                changes.push(SettingChange {
-                    field,
-                    current: have.map(|v| v.to_string()),
-                    desired: target.to_string(),
-                });
-            }
+        if let Some(target) = want && have != Some(target) {
+            changes.push(SettingChange {
+                field,
+                current: have.map(|v| v.to_string()),
+                desired: target.to_string(),
+            });
         }
     };
 

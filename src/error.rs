@@ -47,7 +47,7 @@ pub enum Error {
     #[error("glob error reading paths: {0}")]
     GlobGlob(#[from] glob::GlobError),
     #[error("github api error: {0}")]
-    Octo(#[from] octocrab::Error),
+    Octo(Box<octocrab::Error>),
     #[error("repository '{org}/{repo}' not found")]
     RepoNotFound { org: String, repo: String },
     #[error("repo '{repo}' has conflicting config: {reason}")]
@@ -85,5 +85,11 @@ impl Error {
             source,
             path: format!(" in {}", path.display()),
         }
+    }
+}
+
+impl From<octocrab::Error> for Error {
+    fn from(err: octocrab::Error) -> Self {
+        Error::Octo(Box::new(err))
     }
 }

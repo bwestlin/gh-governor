@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -24,6 +23,10 @@ struct Args {
     /// GitHub organization to use for tests
     #[arg(long)]
     org: String,
+
+    /// GitHub token (falls back to GITHUB_TOKEN)
+    #[arg(long, env = "GITHUB_TOKEN")]
+    token: String,
 
     /// Config base for plan/apply
     #[arg(long)]
@@ -64,12 +67,13 @@ enum E2eCommand {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    // TODO Have the token passed via clap args instead
-    let token = env::var("GITHUB_TOKEN").map_err(|_| {
-        Error::InvalidArgs("GITHUB_TOKEN is not set in the environment".to_string())
-    })?;
+    if args.token.trim().is_empty() {
+        return Err(Error::InvalidArgs(
+            "GITHUB_TOKEN is not set in the environment or via --token".to_string(),
+        ));
+    }
 
-    let gh = GithubClient::new(&token, args.org.clone())?;
+    let gh = GithubClient::new(&args.token, args.org.clone())?;
 
     match args.command {
         E2eCommand::Run => run_flow(&gh, &args).await,
@@ -172,6 +176,7 @@ async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
             &args.config_base,
             &plan_log,
             args.verbose,
+            &args.token,
         ) {
             log_status(
                 &args.logs,
@@ -198,6 +203,7 @@ async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
             &args.config_base,
             &apply_log,
             args.verbose,
+            &args.token,
         ) {
             log_status(
                 &args.logs,
@@ -370,6 +376,7 @@ fn run_governor(
     config_base: &Path,
     log_path: &Path,
     verbose: bool,
+    token: &str,
 ) -> Result<()> {
     log(
         logs,
@@ -398,10 +405,8 @@ fn run_governor(
     cmd.args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
-            cmd.env("GITHUB_TOKEN", token);
-        }
+    if !token.trim().is_empty() {
+        cmd.env("GITHUB_TOKEN", token);
     }
 
     let status = run_command(logs, log_path, verbose, cmd, &cmd_line)?;

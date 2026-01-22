@@ -1,0 +1,7 @@
+{
+  "bug": { "color": "d73a4a", "description": "Something isn't working" },
+  "feature": { "color": "0e8a16", "description": "New feature or request" },
+  "chore": { "color": "cfd3d7", "description": "Maintenance or cleanup" },
+  "triage": { "color": "cccccc", "description": "Needs triage" },
+  "needs-info": { "color": "5319e7", "description": "Awaiting more details" }
+}

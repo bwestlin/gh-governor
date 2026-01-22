@@ -1,0 +1,13 @@
+org = "bwestlin-testing"
+default_sets = ["core"]
+
+[[repos]]
+name = "repo1"
+sets = ["strict-protection"]
+
+[[repos]]
+name = "repo2"
+sets = ["docs"]
+
+[[repos]]
+name = "repo3"

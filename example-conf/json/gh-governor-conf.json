@@ -1,0 +1,9 @@
+{
+  "org": "bwestlin-testing",
+  "default_sets": ["core"],
+  "repos": [
+    { "name": "repo1", "sets": ["strict-protection"] },
+    { "name": "repo2", "sets": ["docs"] },
+    { "name": "repo3" }
+  ]
+}

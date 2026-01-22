@@ -44,6 +44,7 @@ enum E2eCommand {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    // TODO Have the token passed via clap args instead
     let token = env::var("GITHUB_TOKEN").map_err(|_| {
         Error::InvalidArgs("GITHUB_TOKEN is not set in the environment".to_string())
     })?;

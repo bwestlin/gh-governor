@@ -1,20 +1,29 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
-use owo_colors::OwoColorize;
-
-use gh_governor::config::{RepoConfig, RootConfig, load_root_config, resolve_sets_dir};
-use gh_governor::error::{Error, Result};
+use clap::Parser;
+use clap::Subcommand;
+use gh_governor::config::RepoConfig;
+use gh_governor::config::RootConfig;
+use gh_governor::config::load_root_config;
+use gh_governor::config::resolve_sets_dir;
+use gh_governor::error::Error;
+use gh_governor::error::Result;
 use gh_governor::github::GithubClient;
 use gh_governor::merge::merge_sets_for_repo;
 use gh_governor::sets::SetDefinition;
+use owo_colors::OwoColorize;
 use tokio::time::sleep;
 
 #[derive(Parser, Debug)]
@@ -96,7 +105,11 @@ async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
             } else {
                 ""
             },
-            if args.cleanup { "--cleanup" } else { "--no-cleanup" }
+            if args.cleanup {
+                "--cleanup"
+            } else {
+                "--no-cleanup"
+            }
         );
         log(&args.logs, options.trim_end());
     }
@@ -471,12 +484,14 @@ fn run_command(
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::io_with_path(e, log_path.into()))?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        Error::InvalidArgs("failed to capture stdout from command".to_string())
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        Error::InvalidArgs("failed to capture stderr from command".to_string())
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::InvalidArgs("failed to capture stdout from command".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| Error::InvalidArgs("failed to capture stderr from command".to_string()))?;
 
     let file = fs::OpenOptions::new()
         .create(true)
@@ -665,7 +680,15 @@ fn collect_sets(
             let loaded = gh_governor::sets::load_set(sets_dir, set_name)?;
             cache.insert(set_name.clone(), loaded);
         }
-        let cached = cache.get(set_name).expect("set should be loaded").clone();
+        let cached = match cache.get(set_name) {
+            Some(value) => value.clone(),
+            None => {
+                return Err(Error::InvalidArgs(format!(
+                    "missing set '{}' after loading",
+                    set_name
+                )));
+            }
+        };
         set_defs.push(cached);
     }
     Ok(set_defs)
@@ -729,6 +752,10 @@ fn log_summary(dir: &Path, passed: u64, failed: u64) {
         .open(log_path)
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
     println!();
-    let colored = format!("Summary: {} passed, {} failed", passed.green(), failed.red());
+    let colored = format!(
+        "Summary: {} passed, {} failed",
+        passed.green(),
+        failed.red()
+    );
     println!("{}", colored);
 }

@@ -1,18 +1,28 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use octocrab::Octocrab;
-use octocrab::models::{IssueState, Label, issues::Issue, pulls::PullRequest};
+use octocrab::models::IssueState;
+use octocrab::models::Label;
+use octocrab::models::issues::Issue;
+use octocrab::models::pulls::PullRequest;
 use octocrab::params;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::NON_ALPHANUMERIC;
+use percent_encoding::utf8_percent_encode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::warn;
 
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 use crate::sets::LabelSpec;
-use crate::settings::{
-    BranchProtectionRule, BranchRestrictions, PullRequestSettings, RepoSettings,
-    RequiredPullRequestReviews, RequiredStatusChecks, ReviewDismissalRestrictions, StatusCheck,
-};
+use crate::settings::BranchProtectionRule;
+use crate::settings::BranchRestrictions;
+use crate::settings::PullRequestSettings;
+use crate::settings::RepoSettings;
+use crate::settings::RequiredPullRequestReviews;
+use crate::settings::RequiredStatusChecks;
+use crate::settings::ReviewDismissalRestrictions;
+use crate::settings::StatusCheck;
 
 #[derive(Debug, Clone)]
 pub struct RepoFile {

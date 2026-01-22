@@ -1,16 +1,25 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 use chrono::Utc;
-use owo_colors::{OwoColorize, Stream};
-use serde::{Deserialize, Serialize};
+use owo_colors::OwoColorize;
+use owo_colors::Stream;
+use serde::Deserialize;
+use serde::Serialize;
 use tracing::info;
 
-use crate::diff::{RepoSettingsDiff, diff_labels, diff_repo_settings};
+use crate::diff::RepoSettingsDiff;
+use crate::diff::diff_labels;
+use crate::diff::diff_repo_settings;
 use crate::error::Result;
-use crate::github::{GithubClient, LabelUsageEntry};
-use crate::merge::{MergedRepoConfig, merge_sets_for_repo};
-use crate::sets::{GithubFile, LabelSpec, SetDefinition};
+use crate::github::GithubClient;
+use crate::github::LabelUsageEntry;
+use crate::merge::MergedRepoConfig;
+use crate::merge::merge_sets_for_repo;
+use crate::sets::GithubFile;
+use crate::sets::LabelSpec;
+use crate::sets::SetDefinition;
 use crate::settings::BranchProtectionRule;
 
 #[derive(Clone, Copy, Debug)]
@@ -587,10 +596,14 @@ fn branch_rule_details(rule: &BranchProtectionRule) -> Vec<String> {
         if let Some(strict) = sc.strict {
             lines.push(format!("status checks strict: {}", strict));
         }
-        if let Some(ctx) = &sc.contexts && !ctx.is_empty() {
+        if let Some(ctx) = &sc.contexts
+            && !ctx.is_empty()
+        {
             lines.push(format!("status contexts: {}", ctx.join(", ")));
         }
-        if let Some(checks) = &sc.checks && !checks.is_empty() {
+        if let Some(checks) = &sc.checks
+            && !checks.is_empty()
+        {
             let list: Vec<String> = checks
                 .iter()
                 .map(|c| {
@@ -687,7 +700,13 @@ fn branch_rule_diff(
             vec!["new rule".to_string()]
         };
     }
-    let current = current.expect("checked is_none");
+    let Some(current) = current else {
+        return if verbose {
+            branch_rule_details(target)
+        } else {
+            vec!["new rule".to_string()]
+        };
+    };
 
     diff_bool(
         "status checks strict",
@@ -1108,10 +1127,15 @@ fn prepare_merged(
                 let loaded = crate::sets::load_set(sets_dir, set_name)?;
                 set_cache.insert(set_name.clone(), loaded);
             }
-            let cached = set_cache
-                .get(set_name)
-                .expect("set should be loaded")
-                .clone();
+            let cached = match set_cache.get(set_name) {
+                Some(value) => value.clone(),
+                None => {
+                    return Err(crate::error::Error::InvalidArgs(format!(
+                        "missing set '{}' after loading",
+                        set_name
+                    )));
+                }
+            };
             set_defs.push(cached);
         }
 

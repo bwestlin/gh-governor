@@ -1,13 +1,18 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 use glob::glob;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
-use crate::error::{Error, Result};
-use crate::settings::{BranchProtectionConfig, RepoSettings};
-use crate::util::{SUPPORTED_EXTS, parse_by_extension};
+use crate::error::Error;
+use crate::error::Result;
+use crate::settings::BranchProtectionConfig;
+use crate::settings::RepoSettings;
+use crate::util::SUPPORTED_EXTS;
+use crate::util::parse_by_extension;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LabelSpec {

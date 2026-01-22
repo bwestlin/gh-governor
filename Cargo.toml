@@ -2,6 +2,11 @@
 name = "gh-governor"
 version = "0.1.0"
 edition = "2024"
+autobins = false
+
+[[bin]]
+name = "gh-governor"
+path = "src/main.rs"
 
 [dependencies]
 base64 = "0.22.1"

@@ -356,22 +356,35 @@ fn run_governor(
             config_base.display()
         ),
     );
+    let governor_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("gh-governor")))
+        .unwrap_or_else(|| PathBuf::from("target").join("debug").join("gh-governor"));
+    if !governor_path.exists() {
+        return Err(Error::InvalidArgs(format!(
+            "gh-governor binary not found at {} (run `cargo build --bin gh-governor` first)",
+            governor_path.display()
+        )));
+    }
+
     let args = vec![
-        "run".to_string(),
-        "--quiet".to_string(),
-        "--bin".to_string(),
-        "gh-governor".to_string(),
-        "--".to_string(),
         "-v".to_string(),
         mode.to_string(),
         "--config-base".to_string(),
         config_base.display().to_string(),
     ];
     if verbose {
-        log(logs, &format!("  Command: cargo {}", args.join(" ")));
+        log(
+            logs,
+            &format!(
+                "  Command: {} {}",
+                governor_path.display(),
+                args.join(" ")
+            ),
+        );
     }
 
-    let mut cmd = Command::new("cargo");
+    let mut cmd = Command::new(&governor_path);
     cmd.args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

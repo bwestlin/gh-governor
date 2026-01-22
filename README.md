@@ -1,4 +1,5 @@
 # gh-governor
+<!-- markdownlint-disable MD036 -->
 
 ## TODO
 
@@ -32,6 +33,8 @@ cargo run --bin e2e -- \
   --verbose \
   run
 ```
+
+Note: the e2e runner executes the `gh-governor` binary located next to the `e2e` binary under `target` (debug or release).
 
 Optional flags: `--verbose` to show plan/apply output, `--continue-on-fail` to run all steps before exiting non-zero, `--no-cleanup` to keep repos after the run.
 

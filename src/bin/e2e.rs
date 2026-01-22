@@ -292,8 +292,8 @@ async fn cleanup(gh: &GithubClient, repos: &[String], logs: &Path) -> Result<()>
 fn cleanup_error_hint(err: &Error) -> Option<&'static str> {
     match err {
         Error::Octo(octocrab::Error::GitHub { source, .. }) => {
-            if source.status_code == reqwest::StatusCode::FORBIDDEN
-                || source.status_code == reqwest::StatusCode::UNAUTHORIZED
+            if source.status_code == http::StatusCode::FORBIDDEN
+                || source.status_code == http::StatusCode::UNAUTHORIZED
             {
                 return Some("token likely missing 'delete_repo' scope");
             }

@@ -305,7 +305,7 @@ impl GithubClient {
                 }))
             }
             Err(octocrab::Error::GitHub { ref source, .. })
-                if source.status_code == reqwest::StatusCode::NOT_FOUND =>
+                if source.status_code == http::StatusCode::NOT_FOUND =>
             {
                 Ok(None)
             }
@@ -433,12 +433,12 @@ impl GithubClient {
                 Ok(None)
             }
             Err(octocrab::Error::GitHub { ref source, .. })
-                if source.status_code == reqwest::StatusCode::NOT_FOUND =>
+                if source.status_code == http::StatusCode::NOT_FOUND =>
             {
                 Ok(None)
             }
             Err(octocrab::Error::GitHub { ref source, .. })
-                if source.status_code == reqwest::StatusCode::FORBIDDEN =>
+                if source.status_code == http::StatusCode::FORBIDDEN =>
             {
                 warn!(
                     "branch protection not available for {}/{}: {}",
@@ -488,7 +488,7 @@ impl GithubClient {
         match self.inner._put(path, Some(&body)).await {
             Ok(_) => Ok(()),
             Err(octocrab::Error::GitHub { ref source, .. })
-                if source.status_code == reqwest::StatusCode::FORBIDDEN =>
+                if source.status_code == http::StatusCode::FORBIDDEN =>
             {
                 warn!(
                     "branch protection not available for {}/{}: {}",
@@ -538,7 +538,7 @@ impl GithubClient {
         match self.inner._post(path, Some(&body)).await {
             Ok(_) => Ok(()),
             Err(octocrab::Error::GitHub { ref source, .. })
-                if source.status_code == reqwest::StatusCode::UNPROCESSABLE_ENTITY =>
+                if source.status_code == http::StatusCode::UNPROCESSABLE_ENTITY =>
             {
                 // branch probably exists; treat as success
                 Ok(())
@@ -596,7 +596,7 @@ impl GithubClient {
         {
             Ok(_) => Ok(()),
             Err(octocrab::Error::GitHub { ref source, .. })
-                if source.status_code == reqwest::StatusCode::UNPROCESSABLE_ENTITY =>
+                if source.status_code == http::StatusCode::UNPROCESSABLE_ENTITY =>
             {
                 // Repo probably exists; treat as success.
                 Ok(())
@@ -613,7 +613,7 @@ impl GithubClient {
         {
             Ok(_) => Ok(()),
             Err(octocrab::Error::GitHub { ref source, .. })
-                if source.status_code == reqwest::StatusCode::NOT_FOUND =>
+                if source.status_code == http::StatusCode::NOT_FOUND =>
             {
                 Ok(())
             }
@@ -721,7 +721,7 @@ where
 
 fn map_repo_error(org: &str, repo: &str, err: octocrab::Error) -> Error {
     if let octocrab::Error::GitHub { source, .. } = &err {
-        if source.status_code == reqwest::StatusCode::NOT_FOUND {
+        if source.status_code == http::StatusCode::NOT_FOUND {
             return Error::RepoNotFound {
                 org: org.to_string(),
                 repo: repo.to_string(),

@@ -28,6 +28,7 @@
 
 - New modules should live under existing folders (no new top-level crates).
 - Avoid introducing new dependencies unless necessary.
+  - When introducing dependencies try to avoid introducing multiple version of dependencies in the dependency-tree.
 
 ### Error handling
 

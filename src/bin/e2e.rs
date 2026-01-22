@@ -680,7 +680,15 @@ fn collect_sets(
             let loaded = gh_governor::sets::load_set(sets_dir, set_name)?;
             cache.insert(set_name.clone(), loaded);
         }
-        let cached = cache.get(set_name).expect("set should be loaded").clone();
+        let cached = match cache.get(set_name) {
+            Some(value) => value.clone(),
+            None => {
+                return Err(Error::InvalidArgs(format!(
+                    "missing set '{}' after loading",
+                    set_name
+                )));
+            }
+        };
         set_defs.push(cached);
     }
     Ok(set_defs)

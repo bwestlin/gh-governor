@@ -700,7 +700,13 @@ fn branch_rule_diff(
             vec!["new rule".to_string()]
         };
     }
-    let current = current.expect("checked is_none");
+    let Some(current) = current else {
+        return if verbose {
+            branch_rule_details(target)
+        } else {
+            vec!["new rule".to_string()]
+        };
+    };
 
     diff_bool(
         "status checks strict",
@@ -1121,10 +1127,15 @@ fn prepare_merged(
                 let loaded = crate::sets::load_set(sets_dir, set_name)?;
                 set_cache.insert(set_name.clone(), loaded);
             }
-            let cached = set_cache
-                .get(set_name)
-                .expect("set should be loaded")
-                .clone();
+            let cached = match set_cache.get(set_name) {
+                Some(value) => value.clone(),
+                None => {
+                    return Err(crate::error::Error::InvalidArgs(format!(
+                        "missing set '{}' after loading",
+                        set_name
+                    )));
+                }
+            };
             set_defs.push(cached);
         }
 

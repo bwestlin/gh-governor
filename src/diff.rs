@@ -117,13 +117,8 @@ pub fn diff_repo_settings(desired: &RepoSettings, current: &RepoSettings) -> Rep
         current_pr.and_then(|p| p.delete_branch_on_merge),
     );
 
-    if desired_pr.merge_commit_message_option.is_some() {
-        let (title, msg) = crate::settings::map_merge_message_option(
-            desired_pr
-                .merge_commit_message_option
-                .as_ref()
-                .expect("checked is_some"),
-        );
+    if let Some(option) = desired_pr.merge_commit_message_option.as_ref() {
+        let (title, msg) = crate::settings::map_merge_message_option(option);
         let title_str = title.as_ref().map(|v| format!("{:?}", v));
         let msg_str = msg.as_ref().map(|v| format!("{:?}", v));
         // Cannot read current merge title/message; treat as desired change whenever set.
@@ -140,13 +135,8 @@ pub fn diff_repo_settings(desired: &RepoSettings, current: &RepoSettings) -> Rep
         }
     }
 
-    if desired_pr.squash_merge_option.is_some() {
-        let (title, msg) = crate::settings::map_squash_option(
-            desired_pr
-                .squash_merge_option
-                .as_ref()
-                .expect("checked is_some"),
-        );
+    if let Some(option) = desired_pr.squash_merge_option.as_ref() {
+        let (title, msg) = crate::settings::map_squash_option(option);
         let title_str = title.as_ref().map(|v| format!("{:?}", v));
         let msg_str = msg.as_ref().map(|v| format!("{:?}", v));
         // We cannot read current squash title/message via Octocrab, so always treat option as a desired change.

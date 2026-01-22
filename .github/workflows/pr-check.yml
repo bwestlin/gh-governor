@@ -1,0 +1,16 @@
+name: PR Check
+
+on:
+    pull_request:
+        types: [opened, synchronize, reopened, edited]
+
+jobs:
+    check-title:
+        runs-on: ubuntu-latest
+        steps:
+            - name: PR Conventional Commit Validation
+              uses: ytanikin/pr-conventional-commits@1.5.1
+              with:
+                  task_types: '["feat","fix","docs","test","ci","refactor","perf","chore","revert"]'
+                  add_label: "false"
+                  title_regex: "^\\w+(\\(.+?\\))?\\:\\s[A-Z].*"

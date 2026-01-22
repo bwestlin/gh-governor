@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -93,6 +94,8 @@ async fn main() -> Result<()> {
     }
 }
 
+const PR_BRANCH_PREFIX: &str = "gh-governor/updates-";
+
 async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
     fs::create_dir_all(&args.logs)?;
     log_status(&args.logs, StepStatus::Info, "Starting e2e run");
@@ -115,6 +118,8 @@ async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
     }
 
     let repos = load_repo_names(&args.config_base)?;
+    let oauth_scopes = gh.oauth_scopes().await?;
+    let has_workflow_files = has_workflow_files(&args.config_base, &repos)?;
     let mut last_err: Option<Error> = None;
     let mut summary = RunSummary::default();
     let mut proceed = true;
@@ -230,9 +235,46 @@ async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
         }
     }
 
+    if proceed && has_workflow_files {
+        log_status(
+            &args.logs,
+            StepStatus::Info,
+            "Checking workflow scope warning",
+        );
+        if let Err(err) =
+            check_workflow_scope_warning(&args.logs, &plan_log, &apply_log, oauth_scopes.as_ref())
+        {
+            log_status(
+                &args.logs,
+                StepStatus::Fail,
+                &format!("Workflow scope warning check failed: {}", err),
+            );
+            last_err = Some(err);
+            summary.failed += 1;
+            if !args.continue_on_fail {
+                proceed = false;
+            }
+        } else {
+            log_status(
+                &args.logs,
+                StepStatus::Ok,
+                "Workflow scope warning check complete",
+            );
+            summary.passed += 1;
+        }
+    }
+
     if proceed {
         log_status(&args.logs, StepStatus::Info, "Verifying state");
-        if let Err(err) = verify_state(gh, &args.config_base, &repos, &args.logs).await {
+        if let Err(err) = verify_state(
+            gh,
+            &args.config_base,
+            &repos,
+            &args.logs,
+            oauth_scopes.as_ref(),
+        )
+        .await
+        {
             log_status(
                 &args.logs,
                 StepStatus::Fail,
@@ -562,11 +604,59 @@ fn load_repo_names(config_base: &Path) -> Result<Vec<String>> {
     Ok(repos)
 }
 
+fn has_workflow_files(config_base: &Path, repos: &[String]) -> Result<bool> {
+    let (root, _) = load_root_config(config_base)?;
+    let sets_dir = resolve_sets_dir(config_base, &root);
+    let merged = prepare_merged(&root, &sets_dir, repos)?;
+    for (_repo_name, cfg) in merged {
+        if cfg
+            .github_files
+            .iter()
+            .any(|file| short_github_path(&file.path).starts_with(".github/workflows/"))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn check_workflow_scope_warning(
+    logs: &Path,
+    plan_log: &Path,
+    apply_log: &Path,
+    scopes: Option<&Vec<String>>,
+) -> Result<()> {
+    let warning = "Warning: token missing 'workflow' scope; .github/workflows updates will fail";
+    let Some(scopes) = scopes else {
+        log(
+            logs,
+            "Skipping workflow scope warning check (X-OAuth-Scopes not available)",
+        );
+        return Ok(());
+    };
+    let has_workflow_scope = scopes.iter().any(|scope| scope == "workflow");
+    let plan_text = fs::read_to_string(plan_log)?;
+    let apply_text = fs::read_to_string(apply_log)?;
+    let saw_warning = plan_text.contains(warning) || apply_text.contains(warning);
+    if has_workflow_scope && saw_warning {
+        return Err(Error::InvalidArgs(
+            "workflow warning present despite token having 'workflow' scope".to_string(),
+        ));
+    }
+    if !has_workflow_scope && !saw_warning {
+        return Err(Error::InvalidArgs(
+            "missing workflow warning despite token lacking 'workflow' scope".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn verify_state(
     gh: &GithubClient,
     config_base: &Path,
     repos: &[String],
     logs: &Path,
+    oauth_scopes: Option<&Vec<String>>,
 ) -> Result<()> {
     log(logs, "Verifying state via GitHub API");
     let (root, _) = load_root_config(config_base)?;
@@ -576,21 +666,42 @@ async fn verify_state(
     let mut failed_repos: Vec<String> = Vec::new();
 
     for (repo_name, cfg) in merged {
-        log(logs, &format!("Verifying {}", repo_name));
+        log_repo_header(logs, &format!("Repo {}", repo_name));
+        let repo_info = gh.get_repo(&repo_name).await?;
+        let base_branch = repo_info
+            .default_branch
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+
+        log_repo_line(
+            logs,
+            &format!("Check labels ({} expected)", cfg.labels.len()),
+        );
         let labels = gh.list_repo_labels(&repo_name).await?;
         let label_names: Vec<String> = labels.iter().map(|l| l.name.clone()).collect();
         let mut repo_failed = false;
         for label in &cfg.labels {
             if !label_names.iter().any(|n| n == &label.name) {
-                log(
+                log_repo_line(
                     logs,
                     &format!("Missing label {} on {}", label.name, repo_name),
                 );
+                log_repo_sub(logs, &format!("expected label: {}", label.name));
                 failures += 1;
                 repo_failed = true;
             }
         }
 
+        let bp_count = cfg
+            .repo_settings
+            .as_ref()
+            .and_then(|s| s.branch_protection.as_ref())
+            .map(|cfg| cfg.rules.len())
+            .unwrap_or(0);
+        log_repo_line(
+            logs,
+            &format!("Check branch protection ({} expected)", bp_count),
+        );
         if let Some(bp_cfg) = cfg
             .repo_settings
             .as_ref()
@@ -599,27 +710,198 @@ async fn verify_state(
             for rule in &bp_cfg.rules {
                 let current = gh.get_branch_protection(&repo_name, &rule.pattern).await?;
                 if current.is_none() {
-                    log(
+                    log_repo_line(
                         logs,
                         &format!(
                             "Missing branch protection {} on {}",
                             rule.pattern, repo_name
                         ),
                     );
+                    log_repo_sub(logs, &format!("expected branch: {}", rule.pattern));
                     failures += 1;
                     repo_failed = true;
                 }
             }
         }
 
-        if !cfg.github_files.is_empty() {
-            let pr = gh
-                .find_open_pr_by_head_prefix(&repo_name, "gh-governor/updates-", "main")
-                .await?;
-            if pr.is_none() {
-                log(
+        log_repo_line(
+            logs,
+            &format!(
+                "Check .github updates ({} expected file(s))",
+                cfg.github_files.len()
+            ),
+        );
+        if cfg.github_files.is_empty() {
+            log_repo_line(logs, "No .github files configured; skipping PR check");
+        } else {
+            let has_workflow_files = cfg
+                .github_files
+                .iter()
+                .any(|file| short_github_path(&file.path).starts_with(".github/workflows/"));
+            let missing_workflow_scope = has_workflow_files
+                && oauth_scopes
+                    .map(|scopes| !scopes.iter().any(|scope| scope == "workflow"))
+                    .unwrap_or(false);
+            if missing_workflow_scope {
+                log_repo_line(
                     logs,
-                    &format!("Missing PR for .github updates in {}", repo_name),
+                    "Note: token missing 'workflow' scope; workflow updates may fail",
+                );
+            }
+
+            let mut missing_files = Vec::new();
+            for file in &cfg.github_files {
+                if gh
+                    .get_file(&repo_name, &file.path, Some(&base_branch))
+                    .await?
+                    .is_none()
+                {
+                    missing_files.push(file.path.clone());
+                }
+            }
+            let needs_pr = !missing_files.is_empty();
+            if needs_pr {
+                log_repo_line(
+                    logs,
+                    &format!("Base branch missing: {}", missing_files.join(", ")),
+                );
+            } else {
+                log_repo_line(logs, "Base branch missing: none");
+            }
+
+            let existing_pr = gh
+                .find_open_pr_by_head_prefix(&repo_name, PR_BRANCH_PREFIX, &base_branch)
+                .await?;
+            if let Some(pr) = &existing_pr {
+                let owner = repo_info
+                    .owner
+                    .as_ref()
+                    .map(|o| o.login.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let url = pr
+                    .html_url
+                    .as_ref()
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "https://github.com/{}/{}/pull/{}",
+                            owner, repo_name, pr.number
+                        )
+                    });
+                log_repo_line(
+                    logs,
+                    &format!(
+                        "PR: #{} {} ({} -> {})",
+                        pr.number, url, pr.head.ref_field, base_branch
+                    ),
+                );
+            } else {
+                log_repo_line(logs, "PR: none");
+            }
+
+            let branch_name = existing_pr
+                .as_ref()
+                .map(|pr| pr.head.ref_field.clone())
+                .unwrap_or_else(|| format!("{}{}", PR_BRANCH_PREFIX, base_branch));
+            let branch_exists = gh
+                .get_branch_sha_optional(&repo_name, &branch_name)
+                .await?
+                .is_some();
+            log_repo_line(
+                logs,
+                &format!(
+                    "PR branch {}: {}",
+                    branch_name,
+                    if branch_exists { "exists" } else { "missing" }
+                ),
+            );
+
+            if needs_pr {
+                if missing_workflow_scope {
+                    log_repo_line(
+                        logs,
+                        "Note: token missing 'workflow' scope; workflow updates may fail",
+                    );
+                }
+                if existing_pr.is_none() {
+                    log_repo_line(
+                        logs,
+                        &format!("Missing PR for .github updates in {}", repo_name),
+                    );
+                    log_repo_sub(
+                        logs,
+                        &format!("expected branch: {}{}", PR_BRANCH_PREFIX, base_branch),
+                    );
+                    failures += 1;
+                    repo_failed = true;
+                }
+                if !branch_exists {
+                    log_repo_line(
+                        logs,
+                        &format!("Missing update branch {} for {}", branch_name, repo_name),
+                    );
+                    log_repo_sub(logs, &format!("expected branch: {}", branch_name));
+                    failures += 1;
+                    repo_failed = true;
+                }
+                if let Some(pr) = &existing_pr {
+                    let expected_files: HashSet<String> = cfg
+                        .github_files
+                        .iter()
+                        .map(|file| short_github_path(&file.path))
+                        .collect();
+                    let actual_files: HashSet<String> = gh
+                        .list_github_files(&repo_name, &pr.head.ref_field, ".github/")
+                        .await?
+                        .into_iter()
+                        .collect();
+                    let mut missing = expected_files
+                        .difference(&actual_files)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let mut extra = actual_files
+                        .difference(&expected_files)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    missing.sort();
+                    extra.sort();
+                    if missing.is_empty() && extra.is_empty() {
+                        log_repo_line(logs, "PR .github files: match expected");
+                    } else {
+                        log_repo_line(logs, "PR .github files: mismatch");
+                        if !missing.is_empty() {
+                            log_repo_line(
+                                logs,
+                                &format!("PR missing files: {}", missing.join(", ")),
+                            );
+                            for path in &missing {
+                                log_repo_sub(
+                                    logs,
+                                    &format!("missing in PR: {}", short_github_path(path)),
+                                );
+                            }
+                        }
+                        if !extra.is_empty() {
+                            log_repo_line(logs, &format!("PR extra files: {}", extra.join(", ")));
+                            for path in &extra {
+                                log_repo_sub(
+                                    logs,
+                                    &format!("extra in PR: {}", short_github_path(path)),
+                                );
+                            }
+                        }
+                        failures += (missing.len() + extra.len()) as u64;
+                        repo_failed = true;
+                    }
+                }
+            } else if existing_pr.is_some() {
+                log_repo_line(
+                    logs,
+                    &format!("Unexpected PR exists for .github updates in {}", repo_name),
+                );
+                log_repo_sub(
+                    logs,
+                    &format!("unexpected PR with branch prefix: {}", PR_BRANCH_PREFIX),
                 );
                 failures += 1;
                 repo_failed = true;
@@ -694,6 +976,14 @@ fn collect_sets(
     Ok(set_defs)
 }
 
+fn short_github_path(path: &str) -> String {
+    if let Some(idx) = path.find(".github/") {
+        path[idx..].to_string()
+    } else {
+        path.to_string()
+    }
+}
+
 fn log(dir: &Path, msg: &str) {
     let line = format!("  {}\n", msg);
     let log_path = dir.join("e2e.log");
@@ -703,6 +993,39 @@ fn log(dir: &Path, msg: &str) {
         .open(log_path)
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
     println!("  {}", msg);
+}
+
+fn log_repo_header(dir: &Path, msg: &str) {
+    let line = format!("  {}\n", msg);
+    let log_path = dir.join("e2e.log");
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    println!("  {}", msg);
+}
+
+fn log_repo_line(dir: &Path, msg: &str) {
+    let line = format!("    {}\n", msg);
+    let log_path = dir.join("e2e.log");
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    println!("    {}", msg);
+}
+
+fn log_repo_sub(dir: &Path, msg: &str) {
+    let line = format!("      {}\n", msg);
+    let log_path = dir.join("e2e.log");
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    println!("      {}", msg);
 }
 
 #[derive(Copy, Clone)]

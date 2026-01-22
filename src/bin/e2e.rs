@@ -45,7 +45,7 @@ struct Args {
     #[arg(long, default_value = "target/e2e-logs")]
     logs: PathBuf,
 
-    /// Show detailed output from plan/apply and steps
+    /// Show detailed output from steps
     #[arg(short, long)]
     verbose: bool,
 

@@ -13,6 +13,10 @@
 - Be concise in summaries.
 - Ask before making structural refactors.
 
+### Documentation
+
+- Keep the documentation updated when making changes.
+
 ## RUST specifics
 
 ### Priorities

@@ -45,6 +45,10 @@ struct Args {
     #[arg(long, default_value_t = true)]
     cleanup: bool,
 
+    /// Build gh-governor before running (use --no-build to disable)
+    #[arg(long, default_value_t = true)]
+    build: bool,
+
     #[command(subcommand)]
     command: E2eCommand,
 }
@@ -101,6 +105,25 @@ async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
     let mut last_err: Option<Error> = None;
     let mut summary = RunSummary::default();
     let mut proceed = true;
+
+    if args.build {
+        log_status(&args.logs, StepStatus::Info, "Building gh-governor");
+        if let Err(err) = build_governor(&args.logs, args.verbose) {
+            log_status(
+                &args.logs,
+                StepStatus::Fail,
+                &format!("Build failed: {}", err),
+            );
+            last_err = Some(err);
+            summary.failed += 1;
+            if !args.continue_on_fail {
+                proceed = false;
+            }
+        } else {
+            log_status(&args.logs, StepStatus::Ok, "Build complete");
+            summary.passed += 1;
+        }
+    }
 
     if proceed {
         log_status(&args.logs, StepStatus::Info, "Creating repos");
@@ -356,10 +379,7 @@ fn run_governor(
             config_base.display()
         ),
     );
-    let governor_path = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("gh-governor")))
-        .unwrap_or_else(|| PathBuf::from("target").join("debug").join("gh-governor"));
+    let governor_path = governor_path()?;
     if !governor_path.exists() {
         return Err(Error::InvalidArgs(format!(
             "gh-governor binary not found at {} (run `cargo build --bin gh-governor` first)",
@@ -373,30 +393,87 @@ fn run_governor(
         "--config-base".to_string(),
         config_base.display().to_string(),
     ];
-    if verbose {
-        log(
-            logs,
-            &format!(
-                "  Command: {} {}",
-                governor_path.display(),
-                args.join(" ")
-            ),
-        );
-    }
-
+    let cmd_line = format!("{} {}", governor_path.display(), args.join(" "));
     let mut cmd = Command::new(&governor_path);
     cmd.args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    let status = run_command(logs, log_path, verbose, cmd, &cmd_line)?;
+
+    if !status.success() {
+        return Err(Error::InvalidArgs(format!(
+            "gh-governor {} failed with status {}",
+            mode, status
+        )));
+    }
+    Ok(())
+}
+
+fn build_governor(logs: &Path, verbose: bool) -> Result<()> {
+    let governor_path = governor_path()?;
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build").arg("--bin").arg("gh-governor");
+    sanitize_cargo_env(&mut cmd);
+    if governor_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("release")
+    {
+        cmd.arg("--release");
+    }
+    let cmd_line = format!(
+        "cargo {}",
+        cmd.get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let log_path = logs.join("build.log");
+    let status = run_command(logs, &log_path, verbose, cmd, &cmd_line)?;
+    if !status.success() {
+        return Err(Error::InvalidArgs(format!(
+            "build failed with status {}",
+            status
+        )));
+    }
+    if !governor_path.exists() {
+        return Err(Error::InvalidArgs(format!(
+            "gh-governor binary not found at {} after build",
+            governor_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn governor_path() -> Result<PathBuf> {
+    Ok(std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("gh-governor")))
+        .unwrap_or_else(|| PathBuf::from("target").join("debug").join("gh-governor")))
+}
+
+fn run_command(
+    logs: &Path,
+    log_path: &Path,
+    verbose: bool,
+    mut cmd: Command,
+    cmd_line: &str,
+) -> Result<std::process::ExitStatus> {
+    if verbose {
+        log(logs, &format!("  Command: {}", cmd_line));
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::io_with_path(e, log_path.into()))?;
     let stdout = child.stdout.take().ok_or_else(|| {
-        Error::InvalidArgs("failed to capture stdout from gh-governor".to_string())
+        Error::InvalidArgs("failed to capture stdout from command".to_string())
     })?;
     let stderr = child.stderr.take().ok_or_else(|| {
-        Error::InvalidArgs("failed to capture stderr from gh-governor".to_string())
+        Error::InvalidArgs("failed to capture stderr from command".to_string())
     })?;
 
     let file = fs::OpenOptions::new()
@@ -439,14 +516,21 @@ fn run_governor(
         .map_err(|e| Error::io_with_path(e, log_path.into()))?;
     let _ = out_handle.join();
     let _ = err_handle.join();
+    Ok(status)
+}
 
-    if !status.success() {
-        return Err(Error::InvalidArgs(format!(
-            "gh-governor {} failed with status {}",
-            mode, status
-        )));
+fn sanitize_cargo_env(cmd: &mut Command) {
+    let preserve = ["CARGO_HOME", "CARGO_TARGET_DIR"];
+    for (key, _value) in std::env::vars() {
+        if key.starts_with("CARGO_") && !preserve.contains(&key.as_str()) {
+            cmd.env_remove(key);
+        }
     }
-    Ok(())
+    for key in preserve {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
 }
 
 fn load_repo_names(config_base: &Path) -> Result<Vec<String>> {

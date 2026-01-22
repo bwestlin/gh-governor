@@ -88,21 +88,17 @@ async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
     fs::create_dir_all(&args.logs)?;
     log_status(&args.logs, StepStatus::Info, "Starting e2e run");
     if args.verbose {
-        log(
-            &args.logs,
-            &format!(
-                "Options: {}{}{}",
-                if args.verbose { "--verbose " } else { "" },
-                if args.continue_on_fail {
-                    "--continue-on-fail "
-                } else {
-                    ""
-                },
-                if args.cleanup { "--cleanup" } else { "--no-cleanup" }
-            )
-            .trim_end()
-            .to_string(),
+        let options = format!(
+            "Options: {}{}{}",
+            if args.verbose { "--verbose " } else { "" },
+            if args.continue_on_fail {
+                "--continue-on-fail "
+            } else {
+                ""
+            },
+            if args.cleanup { "--cleanup" } else { "--no-cleanup" }
         );
+        log(&args.logs, options.trim_end());
     }
 
     let repos = load_repo_names(&args.config_base)?;
@@ -255,12 +251,7 @@ async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
             summary.passed += 1;
         }
     }
-    log_summary(
-        &args.logs,
-        summary.failed == 0,
-        summary.passed,
-        summary.failed,
-    );
+    log_summary(&args.logs, summary.passed, summary.failed);
     last_err.map_or(Ok(()), Err)
 }
 
@@ -320,9 +311,10 @@ async fn cleanup(gh: &GithubClient, repos: &[String], logs: &Path) -> Result<()>
 
 fn cleanup_error_hint(err: &Error) -> Option<&'static str> {
     match err {
-        Error::Octo(octocrab::Error::GitHub { source, .. }) => {
-            if source.status_code == http::StatusCode::FORBIDDEN
-                || source.status_code == http::StatusCode::UNAUTHORIZED
+        Error::Octo(err) => {
+            if let octocrab::Error::GitHub { source, .. } = err.as_ref()
+                && (source.status_code == http::StatusCode::FORBIDDEN
+                    || source.status_code == http::StatusCode::UNAUTHORIZED)
             {
                 return Some("token likely missing 'delete_repo' scope");
             }
@@ -497,7 +489,7 @@ fn run_command(
     let logs_out = logs.to_path_buf();
     let out_handle = thread::spawn(move || {
         let reader = BufReader::new(stdout);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(|line| line.ok()) {
             if let Ok(mut f) = file_out.lock() {
                 let _ = writeln!(f, "stdout | {}", line);
             }
@@ -511,7 +503,7 @@ fn run_command(
     let logs_err = logs.to_path_buf();
     let err_handle = thread::spawn(move || {
         let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(|line| line.ok()) {
             if let Ok(mut f) = file_err.lock() {
                 let _ = writeln!(f, "stderr | {}", line);
             }
@@ -728,7 +720,7 @@ fn log_status(dir: &Path, status: StepStatus, msg: &str) {
     }
 }
 
-fn log_summary(dir: &Path, ok: bool, passed: u64, failed: u64) {
+fn log_summary(dir: &Path, passed: u64, failed: u64) {
     let line = format!("Summary: {} passed, {} failed\n", passed, failed);
     let log_path = dir.join("e2e.log");
     let _ = fs::OpenOptions::new()
@@ -737,10 +729,6 @@ fn log_summary(dir: &Path, ok: bool, passed: u64, failed: u64) {
         .open(log_path)
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
     println!();
-    let colored = if ok {
-        format!("Summary: {} passed, {} failed", passed.green(), failed.red())
-    } else {
-        format!("Summary: {} passed, {} failed", passed.green(), failed.red())
-    };
+    let colored = format!("Summary: {} passed, {} failed", passed.green(), failed.red());
     println!("{}", colored);
 }

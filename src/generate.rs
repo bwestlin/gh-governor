@@ -323,7 +323,7 @@ fn ensure_config_for_templates(templates: &mut Vec<GithubFile>, base_config: Opt
     }
     let mut cfg = base_config
         .and_then(|c| serde_yaml::from_str::<TemplateConfig>(c.contents.as_str()).ok())
-        .unwrap_or_else(|| TemplateConfig {
+        .unwrap_or(TemplateConfig {
             blank_issues_enabled: None,
             contact_links: None,
             issue_templates: None,
@@ -365,7 +365,7 @@ where
     T: Clone,
     F: Fn(&str, &T) -> Result<()>,
 {
-    for (_sig, (repos_unsorted, payload)) in groups {
+    for (repos_unsorted, payload) in groups.values() {
         if repos_unsorted.is_empty() {
             continue;
         }

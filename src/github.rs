@@ -38,7 +38,7 @@ impl GithubClient {
         let inner = Octocrab::builder()
             .personal_token(token.to_string())
             .build()
-            .map_err(Error::Octo)?;
+            .map_err(Error::from)?;
         Ok(Self { inner, org })
     }
 
@@ -601,7 +601,7 @@ impl GithubClient {
                 // Repo probably exists; treat as success.
                 Ok(())
             }
-            Err(e) => Err(Error::Octo(e)),
+            Err(e) => Err(Error::from(e)),
         }
     }
 
@@ -720,15 +720,15 @@ where
 }
 
 fn map_repo_error(org: &str, repo: &str, err: octocrab::Error) -> Error {
-    if let octocrab::Error::GitHub { source, .. } = &err {
-        if source.status_code == http::StatusCode::NOT_FOUND {
-            return Error::RepoNotFound {
-                org: org.to_string(),
-                repo: repo.to_string(),
-            };
-        }
+    if let octocrab::Error::GitHub { source, .. } = &err
+        && source.status_code == http::StatusCode::NOT_FOUND
+    {
+        return Error::RepoNotFound {
+            org: org.to_string(),
+            repo: repo.to_string(),
+        };
     }
-    Error::Octo(err)
+    Error::from(err)
 }
 
 fn collect_issue_refs(issues: &[Issue]) -> Vec<LabelUsageEntry> {

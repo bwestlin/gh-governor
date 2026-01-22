@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use owo_colors::OwoColorize;
 
 use gh_governor::config::{RepoConfig, RootConfig, load_root_config, resolve_sets_dir};
 use gh_governor::error::{Error, Result};
@@ -28,6 +32,18 @@ struct Args {
     /// Directory for logs
     #[arg(long, default_value = "target/e2e-logs")]
     logs: PathBuf,
+
+    /// Show detailed output from plan/apply and steps
+    #[arg(short, long)]
+    verbose: bool,
+
+    /// Continue running steps after a failure (still exits non-zero at end)
+    #[arg(long)]
+    continue_on_fail: bool,
+
+    /// Cleanup repos after run (use --no-cleanup to disable)
+    #[arg(long, default_value_t = true)]
+    cleanup: bool,
 
     #[command(subcommand)]
     command: E2eCommand,
@@ -62,21 +78,161 @@ async fn main() -> Result<()> {
 
 async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
     fs::create_dir_all(&args.logs)?;
-    log(&args.logs, "Starting e2e run");
+    log_status(&args.logs, StepStatus::Info, "Starting e2e run");
+    if args.verbose {
+        log(
+            &args.logs,
+            &format!(
+                "Options: {}{}{}",
+                if args.verbose { "--verbose " } else { "" },
+                if args.continue_on_fail {
+                    "--continue-on-fail "
+                } else {
+                    ""
+                },
+                if args.cleanup { "--cleanup" } else { "--no-cleanup" }
+            )
+            .trim_end()
+            .to_string(),
+        );
+    }
 
     let repos = load_repo_names(&args.config_base)?;
-    create_repos(gh, &repos, &args.logs).await?;
-    seed_repos(gh, &repos, &args.logs).await?;
+    let mut last_err: Option<Error> = None;
+    let mut summary = RunSummary::default();
+    let mut proceed = true;
+
+    if proceed {
+        log_status(&args.logs, StepStatus::Info, "Creating repos");
+        if let Err(err) = create_repos(gh, &repos, &args.logs).await {
+            log_status(
+                &args.logs,
+                StepStatus::Fail,
+                &format!("Create repos failed: {}", err),
+            );
+            last_err = Some(err);
+            summary.failed += 1;
+            if !args.continue_on_fail {
+                proceed = false;
+            }
+        } else {
+            log_status(&args.logs, StepStatus::Ok, "Repos ready");
+            summary.passed += 1;
+        }
+    }
+
+    if proceed {
+        log_status(&args.logs, StepStatus::Info, "Seeding repos");
+        if let Err(err) = seed_repos(gh, &repos, &args.logs).await {
+            log_status(
+                &args.logs,
+                StepStatus::Fail,
+                &format!("Seed repos failed: {}", err),
+            );
+            last_err = Some(err);
+            summary.failed += 1;
+            if !args.continue_on_fail {
+                proceed = false;
+            }
+        } else {
+            log_status(&args.logs, StepStatus::Ok, "Repos seeded");
+            summary.passed += 1;
+        }
+    }
 
     let plan_log = args.logs.join("plan.log");
-    run_governor(&args.logs, "plan", &args.config_base, &plan_log)?;
+    if proceed {
+        log_status(&args.logs, StepStatus::Info, "Running plan");
+        if let Err(err) = run_governor(
+            &args.logs,
+            "plan",
+            &args.config_base,
+            &plan_log,
+            args.verbose,
+        ) {
+            log_status(
+                &args.logs,
+                StepStatus::Fail,
+                &format!("Plan failed: {}", err),
+            );
+            last_err = Some(err);
+            summary.failed += 1;
+            if !args.continue_on_fail {
+                proceed = false;
+            }
+        } else {
+            log_status(&args.logs, StepStatus::Ok, "Plan complete");
+            summary.passed += 1;
+        }
+    }
 
     let apply_log = args.logs.join("apply.log");
-    run_governor(&args.logs, "apply", &args.config_base, &apply_log)?;
+    if proceed {
+        log_status(&args.logs, StepStatus::Info, "Running apply");
+        if let Err(err) = run_governor(
+            &args.logs,
+            "apply",
+            &args.config_base,
+            &apply_log,
+            args.verbose,
+        ) {
+            log_status(
+                &args.logs,
+                StepStatus::Fail,
+                &format!("Apply failed: {}", err),
+            );
+            last_err = Some(err);
+            summary.failed += 1;
+            if !args.continue_on_fail {
+                proceed = false;
+            }
+        } else {
+            log_status(&args.logs, StepStatus::Ok, "Apply complete");
+            summary.passed += 1;
+        }
+    }
 
-    verify_state(gh, &args.config_base, &repos, &args.logs).await?;
-    log(&args.logs, "E2E run complete");
-    Ok(())
+    if proceed {
+        log_status(&args.logs, StepStatus::Info, "Verifying state");
+        if let Err(err) = verify_state(gh, &args.config_base, &repos, &args.logs).await {
+            log_status(
+                &args.logs,
+                StepStatus::Fail,
+                &format!("Verification failed: {}", err),
+            );
+            last_err = Some(err);
+            summary.failed += 1;
+        } else {
+            log_status(&args.logs, StepStatus::Ok, "Verification complete");
+            summary.passed += 1;
+        }
+    }
+    log_status(&args.logs, StepStatus::Ok, "E2E run complete");
+    if args.cleanup {
+        log_status(&args.logs, StepStatus::Info, "Cleanup after run");
+        if let Err(err) = cleanup(gh, &repos, &args.logs).await {
+            log_status(
+                &args.logs,
+                StepStatus::Fail,
+                &format!("Cleanup failed: {}", err),
+            );
+            if !args.continue_on_fail {
+                return Err(err);
+            }
+            last_err = Some(err);
+            summary.failed += 1;
+        } else {
+            log_status(&args.logs, StepStatus::Ok, "Cleanup complete");
+            summary.passed += 1;
+        }
+    }
+    log_summary(
+        &args.logs,
+        summary.failed == 0,
+        summary.passed,
+        summary.failed,
+    );
+    last_err.map_or(Ok(()), Err)
 }
 
 async fn cleanup(gh: &GithubClient, repos: &[String], logs: &Path) -> Result<()> {
@@ -185,7 +341,13 @@ async fn seed_repos(gh: &GithubClient, repos: &[String], logs: &Path) -> Result<
     Ok(())
 }
 
-fn run_governor(logs: &Path, mode: &str, config_base: &Path, log_path: &Path) -> Result<()> {
+fn run_governor(
+    logs: &Path,
+    mode: &str,
+    config_base: &Path,
+    log_path: &Path,
+    verbose: bool,
+) -> Result<()> {
     log(
         logs,
         &format!(
@@ -194,19 +356,83 @@ fn run_governor(logs: &Path, mode: &str, config_base: &Path, log_path: &Path) ->
             config_base.display()
         ),
     );
+    let args = vec![
+        "run".to_string(),
+        "--quiet".to_string(),
+        "--bin".to_string(),
+        "gh-governor".to_string(),
+        "--".to_string(),
+        "-v".to_string(),
+        mode.to_string(),
+        "--config-base".to_string(),
+        config_base.display().to_string(),
+    ];
+    if verbose {
+        log(logs, &format!("  Command: cargo {}", args.join(" ")));
+    }
+
     let mut cmd = Command::new("cargo");
-    cmd.args(["run", "--quiet", "--bin", "gh-governor", "--"])
-        .arg("-v")
-        .arg(mode)
-        .arg("--config-base")
-        .arg(config_base);
-    let output = cmd
-        .output()
+    cmd.args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| Error::io_with_path(e, log_path.into()))?;
-    let mut combined = Vec::new();
-    combined.extend_from_slice(&output.stdout);
-    combined.extend_from_slice(&output.stderr);
-    fs::write(log_path, combined)?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        Error::InvalidArgs("failed to capture stdout from gh-governor".to_string())
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        Error::InvalidArgs("failed to capture stderr from gh-governor".to_string())
+    })?;
+
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(log_path)?;
+    let file = Arc::new(Mutex::new(file));
+
+    let file_out = Arc::clone(&file);
+    let logs_out = logs.to_path_buf();
+    let out_handle = thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().flatten() {
+            if let Ok(mut f) = file_out.lock() {
+                let _ = writeln!(f, "stdout | {}", line);
+            }
+            if verbose {
+                log(&logs_out, &format!("  stdout | {}", line));
+            }
+        }
+    });
+
+    let file_err = Arc::clone(&file);
+    let logs_err = logs.to_path_buf();
+    let err_handle = thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
+            if let Ok(mut f) = file_err.lock() {
+                let _ = writeln!(f, "stderr | {}", line);
+            }
+            if verbose {
+                log(&logs_err, &format!("  stderr | {}", line));
+            }
+        }
+    });
+
+    let status = child
+        .wait()
+        .map_err(|e| Error::io_with_path(e, log_path.into()))?;
+    let _ = out_handle.join();
+    let _ = err_handle.join();
+
+    if !status.success() {
+        return Err(Error::InvalidArgs(format!(
+            "gh-governor {} failed with status {}",
+            mode, status
+        )));
+    }
     Ok(())
 }
 
@@ -232,17 +458,22 @@ async fn verify_state(
     let (root, _) = load_root_config(config_base)?;
     let sets_dir = resolve_sets_dir(config_base, &root);
     let merged = prepare_merged(&root, &sets_dir, repos)?;
+    let mut failures = 0u64;
+    let mut failed_repos: Vec<String> = Vec::new();
 
     for (repo_name, cfg) in merged {
         log(logs, &format!("Verifying {}", repo_name));
         let labels = gh.list_repo_labels(&repo_name).await?;
         let label_names: Vec<String> = labels.iter().map(|l| l.name.clone()).collect();
+        let mut repo_failed = false;
         for label in &cfg.labels {
             if !label_names.iter().any(|n| n == &label.name) {
                 log(
                     logs,
                     &format!("Missing label {} on {}", label.name, repo_name),
                 );
+                failures += 1;
+                repo_failed = true;
             }
         }
 
@@ -261,6 +492,8 @@ async fn verify_state(
                             rule.pattern, repo_name
                         ),
                     );
+                    failures += 1;
+                    repo_failed = true;
                 }
             }
         }
@@ -274,8 +507,22 @@ async fn verify_state(
                     logs,
                     &format!("Missing PR for .github updates in {}", repo_name),
                 );
+                failures += 1;
+                repo_failed = true;
             }
         }
+
+        if repo_failed {
+            failed_repos.push(repo_name);
+        }
+    }
+
+    if failures > 0 {
+        return Err(Error::InvalidArgs(format!(
+            "verification failed: {} missing expectation(s) across repo(s): {}. See e2e.log for details.",
+            failures,
+            failed_repos.join(", ")
+        )));
     }
 
     Ok(())
@@ -326,12 +573,67 @@ fn collect_sets(
 }
 
 fn log(dir: &Path, msg: &str) {
-    let line = format!("[e2e] {}\n", msg);
+    let line = format!("  {}\n", msg);
     let log_path = dir.join("e2e.log");
     let _ = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_path)
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-    println!("{}", msg);
+    println!("  {}", msg);
+}
+
+#[derive(Copy, Clone)]
+enum StepStatus {
+    Info,
+    Ok,
+    Fail,
+}
+
+#[derive(Default)]
+struct RunSummary {
+    passed: u64,
+    failed: u64,
+}
+
+fn log_status(dir: &Path, status: StepStatus, msg: &str) {
+    let label = match status {
+        StepStatus::Info => "INFO",
+        StepStatus::Ok => "OK",
+        StepStatus::Fail => "FAIL",
+    };
+    let line = format!("[{}] {}\n", label, msg);
+    let log_path = dir.join("e2e.log");
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    let colored = match status {
+        StepStatus::Info => label.cyan().to_string(),
+        StepStatus::Ok => label.green().to_string(),
+        StepStatus::Fail => label.red().to_string(),
+    };
+    if matches!(status, StepStatus::Info) {
+        println!("Step - {}", msg);
+    } else {
+        println!("[{}] {}", colored, msg);
+    }
+}
+
+fn log_summary(dir: &Path, ok: bool, passed: u64, failed: u64) {
+    let line = format!("Summary: {} passed, {} failed\n", passed, failed);
+    let log_path = dir.join("e2e.log");
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    println!();
+    let colored = if ok {
+        format!("Summary: {} passed, {} failed", passed.green(), failed.red())
+    } else {
+        format!("Summary: {} passed, {} failed", passed.green(), failed.red())
+    };
+    println!("{}", colored);
 }

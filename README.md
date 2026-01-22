@@ -29,8 +29,11 @@ cargo run --bin e2e -- \
   --org bwestlin-testing \
   --config-base example-conf/toml \
   --logs target/e2e-logs \
+  --verbose \
   run
 ```
+
+Optional flags: `--verbose` to show plan/apply output, `--continue-on-fail` to run all steps before exiting non-zero, `--no-cleanup` to keep repos after the run.
 
 **Cleanup**
 

@@ -96,7 +96,11 @@ async fn run_flow(gh: &GithubClient, args: &Args) -> Result<()> {
             } else {
                 ""
             },
-            if args.cleanup { "--cleanup" } else { "--no-cleanup" }
+            if args.cleanup {
+                "--cleanup"
+            } else {
+                "--no-cleanup"
+            }
         );
         log(&args.logs, options.trim_end());
     }
@@ -471,12 +475,14 @@ fn run_command(
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::io_with_path(e, log_path.into()))?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        Error::InvalidArgs("failed to capture stdout from command".to_string())
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        Error::InvalidArgs("failed to capture stderr from command".to_string())
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::InvalidArgs("failed to capture stdout from command".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| Error::InvalidArgs("failed to capture stderr from command".to_string()))?;
 
     let file = fs::OpenOptions::new()
         .create(true)
@@ -729,6 +735,10 @@ fn log_summary(dir: &Path, passed: u64, failed: u64) {
         .open(log_path)
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
     println!();
-    let colored = format!("Summary: {} passed, {} failed", passed.green(), failed.red());
+    let colored = format!(
+        "Summary: {} passed, {} failed",
+        passed.green(),
+        failed.red()
+    );
     println!("{}", colored);
 }

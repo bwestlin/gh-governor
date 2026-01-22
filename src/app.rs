@@ -587,10 +587,14 @@ fn branch_rule_details(rule: &BranchProtectionRule) -> Vec<String> {
         if let Some(strict) = sc.strict {
             lines.push(format!("status checks strict: {}", strict));
         }
-        if let Some(ctx) = &sc.contexts && !ctx.is_empty() {
+        if let Some(ctx) = &sc.contexts
+            && !ctx.is_empty()
+        {
             lines.push(format!("status contexts: {}", ctx.join(", ")));
         }
-        if let Some(checks) = &sc.checks && !checks.is_empty() {
+        if let Some(checks) = &sc.checks
+            && !checks.is_empty()
+        {
             let list: Vec<String> = checks
                 .iter()
                 .map(|c| {

@@ -1,5 +1,6 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use http_body_util::BodyExt;
 use octocrab::Octocrab;
 use octocrab::models::IssueState;
 use octocrab::models::Label;
@@ -10,6 +11,7 @@ use percent_encoding::NON_ALPHANUMERIC;
 use percent_encoding::utf8_percent_encode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tracing::debug;
 use tracing::warn;
 
 use crate::error::Error;
@@ -50,6 +52,23 @@ impl GithubClient {
             .build()
             .map_err(Error::from)?;
         Ok(Self { inner, org })
+    }
+
+    pub async fn oauth_scopes(&self) -> Result<Option<Vec<String>>> {
+        let response = self.inner._get("/user").await.map_err(Error::from)?;
+        let header = response
+            .headers()
+            .get("x-oauth-scopes")
+            .or_else(|| response.headers().get("X-OAuth-Scopes"));
+        let scopes = header.and_then(|value| value.to_str().ok()).map(|value| {
+            value
+                .split(',')
+                .map(|scope| scope.trim().to_string())
+                .filter(|scope| !scope.is_empty())
+                .collect::<Vec<String>>()
+        });
+        let _ = response.into_body().collect().await;
+        Ok(scopes)
     }
 
     pub async fn get_repo(&self, repo: &str) -> Result<octocrab::models::Repository> {
@@ -332,6 +351,21 @@ impl GithubClient {
         message: &str,
         branch: Option<&str>,
     ) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct PutContent {
+            path: String,
+            sha: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct PutCommit {
+            sha: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct PutResponse {
+            content: Option<PutContent>,
+            commit: Option<PutCommit>,
+        }
+
         #[derive(Serialize)]
         struct Body<'a> {
             message: &'a str,
@@ -349,10 +383,57 @@ impl GithubClient {
             branch,
         };
         let route = format!("/repos/{}/{}/contents/{}", self.org, repo, path);
-        self.inner
+        let response = self
+            .inner
             ._put(route, Some(&body))
             .await
             .map_err(|e| map_repo_error(&self.org, repo, e))?;
+        let status = response.status();
+        let body_bytes = match response.into_body().collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(err) => {
+                warn!(
+                    "failed to read put_file response for {}/{}:{}: {}",
+                    self.org, repo, path, err
+                );
+                return Ok(());
+            }
+        };
+        if body_bytes.is_empty() {
+            return Ok(());
+        }
+        if !status.is_success() {
+            let body_text = String::from_utf8_lossy(&body_bytes);
+            warn!(
+                "put_file response for {}/{}:{} failed (status {}, branch {:?}) body {}",
+                self.org, repo, path, status, branch, body_text
+            );
+            if status == http::StatusCode::NOT_FOUND && path.starts_with(".github/workflows/") {
+                warn!(
+                    "workflow file update for {}/{}:{} returned 404; the token likely needs the 'workflow' scope",
+                    self.org, repo, path
+                );
+            }
+        }
+        match serde_json::from_slice::<PutResponse>(&body_bytes) {
+            Ok(parsed) => {
+                if let Some(ref commit) = parsed.commit {
+                    debug!("wrote {}/{}:{} commit {}", self.org, repo, path, commit.sha);
+                }
+                if let Some(ref content) = parsed.content {
+                    debug!(
+                        "wrote {}/{}:{} content {}",
+                        self.org, repo, content.path, content.sha
+                    );
+                }
+            }
+            Err(err) => {
+                warn!(
+                    "failed to parse put_file response for {}/{}:{} (branch {:?}): {}",
+                    self.org, repo, path, branch, err
+                );
+            }
+        }
         Ok(())
     }
 
@@ -445,6 +526,10 @@ impl GithubClient {
             Err(octocrab::Error::GitHub { ref source, .. })
                 if source.status_code == http::StatusCode::NOT_FOUND =>
             {
+                debug!(
+                    "branch protection not set for {}/{} ({}): {}",
+                    self.org, repo, pattern, source.message
+                );
                 Ok(None)
             }
             Err(octocrab::Error::GitHub { ref source, .. })
@@ -496,13 +581,42 @@ impl GithubClient {
         );
         let body = BranchProtectionRequest::from_rule(rule);
         match self.inner._put(path, Some(&body)).await {
-            Ok(_) => Ok(()),
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    debug!(
+                        "branch protection updated for {}/{} ({})",
+                        self.org, repo, rule.pattern
+                    );
+                    return Ok(());
+                }
+                let body_text = match resp.into_body().collect().await {
+                    Ok(collected) => String::from_utf8_lossy(&collected.to_bytes()).to_string(),
+                    Err(err) => format!("<failed to read body: {err}>"),
+                };
+                let request_body = serde_json::to_string(&body)
+                    .unwrap_or_else(|_| "<failed to serialize request>".to_string());
+                warn!(
+                    "branch protection update failed for {}/{} ({}): status {} body {} request {}",
+                    self.org, repo, rule.pattern, status, body_text, request_body
+                );
+                Ok(())
+            }
             Err(octocrab::Error::GitHub { ref source, .. })
                 if source.status_code == http::StatusCode::FORBIDDEN =>
             {
                 warn!(
                     "branch protection not available for {}/{}: {}",
                     self.org, repo, source.message
+                );
+                Ok(())
+            }
+            Err(octocrab::Error::GitHub { ref source, .. })
+                if source.status_code == http::StatusCode::UNPROCESSABLE_ENTITY =>
+            {
+                warn!(
+                    "branch protection update rejected for {}/{} ({}): {}",
+                    self.org, repo, rule.pattern, source.message
                 );
                 Ok(())
             }
@@ -520,7 +634,7 @@ impl GithubClient {
             object: RefObject,
         }
 
-        let path = format!("/repos/{}/{}/git/ref/heads/{}", self.org, repo, branch);
+        let path = format!("/repos/{}/{}/git/refs/heads/{}", self.org, repo, branch);
         let resp: RefResp = self
             .inner
             .get(path, None::<&()>)
@@ -557,6 +671,32 @@ impl GithubClient {
         }
     }
 
+    pub async fn get_branch_sha_optional(
+        &self,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Option<String>> {
+        #[derive(serde::Deserialize)]
+        struct RefObject {
+            sha: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct RefResp {
+            object: RefObject,
+        }
+
+        let path = format!("/repos/{}/{}/git/refs/heads/{}", self.org, repo, branch);
+        match self.inner.get::<RefResp, _, _>(path, None::<&()>).await {
+            Ok(resp) => Ok(Some(resp.object.sha)),
+            Err(octocrab::Error::GitHub { ref source, .. })
+                if source.status_code == http::StatusCode::NOT_FOUND =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+        }
+    }
+
     pub async fn create_pull_request(
         &self,
         repo: &str,
@@ -565,7 +705,12 @@ impl GithubClient {
         base: &str,
         body: Option<&str>,
         draft: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<PullRequest>> {
+        let head_ref = if head.contains(':') {
+            head.to_string()
+        } else {
+            format!("{}:{}", self.org, head)
+        };
         #[derive(Serialize)]
         struct Body<'a> {
             title: &'a str,
@@ -577,18 +722,31 @@ impl GithubClient {
         }
         let body = Body {
             title,
-            head,
+            head: &head_ref,
             base,
             body,
             draft,
         };
         match self
             .inner
-            ._post(format!("/repos/{}/{}/pulls", self.org, repo), Some(&body))
+            .post(format!("/repos/{}/{}/pulls", self.org, repo), Some(&body))
             .await
         {
-            Ok(_) => Ok(()),
-            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+            Ok(pr) => Ok(Some(pr)),
+            Err(err) => {
+                if let octocrab::Error::GitHub { source, .. } = &err
+                    && source.status_code == http::StatusCode::UNPROCESSABLE_ENTITY
+                    && source
+                        .errors
+                        .as_ref()
+                        .and_then(|errs| errs.iter().find_map(|entry| entry.get("message")))
+                        .and_then(|msg| msg.as_str())
+                        .is_some_and(|msg| msg.contains("No commits between"))
+                {
+                    return Ok(None);
+                }
+                Err(map_repo_error(&self.org, repo, err))
+            }
         }
     }
 
@@ -950,21 +1108,27 @@ struct BranchRestrictionsRequest {
 
 impl BranchProtectionRequest {
     fn from_rule(rule: &BranchProtectionRule) -> Self {
+        let required_status_checks = rule.required_status_checks.as_ref().map(|c| {
+            let checks: Option<Vec<StatusCheckRequest>> = c.checks.as_ref().map(|v| {
+                v.iter()
+                    .map(|c| StatusCheckRequest {
+                        context: c.context.clone(),
+                        app_id: c.app_id,
+                    })
+                    .collect()
+            });
+            let contexts = match checks.as_ref() {
+                Some(list) if !list.is_empty() => None,
+                _ => c.contexts.clone(),
+            };
+            RequiredStatusChecksRequest {
+                strict: c.strict,
+                contexts,
+                checks,
+            }
+        });
         BranchProtectionRequest {
-            required_status_checks: rule.required_status_checks.as_ref().map(|c| {
-                RequiredStatusChecksRequest {
-                    strict: c.strict,
-                    contexts: c.contexts.clone(),
-                    checks: c.checks.as_ref().map(|v| {
-                        v.iter()
-                            .map(|c| StatusCheckRequest {
-                                context: c.context.clone(),
-                                app_id: c.app_id,
-                            })
-                            .collect()
-                    }),
-                }
-            }),
+            required_status_checks,
             enforce_admins: rule.enforce_admins.unwrap_or(false),
             required_pull_request_reviews: rule.required_pull_request_reviews.as_ref().map(|r| {
                 RequiredPullRequestReviewsRequest {

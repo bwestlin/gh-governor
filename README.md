@@ -97,6 +97,7 @@ Notes:
 - Required scopes (classic PAT):
   - Plan/Generate (read-only): `repo:read` (public) or `repo` (private), plus `read:org` if needed.
   - Apply (write): `repo` + `admin:repo` (if your org requires admin to set branch protection).
+  - Apply (workflows): add `workflow` if you manage `.github/workflows/*` files (the tool will warn if missing).
 - `plan` and `apply` use `--config-base` to select `toml`, `yml`, or `json` config directories.
 - `.github/ISSUE_TEMPLATE/config.yml` is synthesized when issue templates exist.
 

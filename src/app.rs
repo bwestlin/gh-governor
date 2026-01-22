@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -46,7 +47,9 @@ pub async fn run(
         root_path.display()
     );
 
-    handle_repos(mode, &gh, merged, verbose).await
+    let oauth_scopes = gh.oauth_scopes().await?;
+    let scope_set = oauth_scopes.map(|scopes| scopes.into_iter().collect::<HashSet<String>>());
+    handle_repos(mode, &gh, merged, verbose, scope_set.as_ref()).await
 }
 
 async fn handle_repos(
@@ -54,6 +57,7 @@ async fn handle_repos(
     gh: &GithubClient,
     merged: Vec<(String, MergedRepoConfig)>,
     verbose: bool,
+    oauth_scopes: Option<&HashSet<String>>,
 ) -> Result<()> {
     for (repo_name, merged_cfg) in merged {
         let repo_info = gh.get_repo(&repo_name).await?;
@@ -73,6 +77,15 @@ async fn handle_repos(
             .find_open_pr_by_head_prefix(&repo_name, PR_BRANCH_PREFIX, &base_branch)
             .await?;
         let compare_branch = existing_pr.as_ref().map(|pr| pr.head.ref_field.clone());
+
+        let has_workflow_files = merged_cfg
+            .github_files
+            .iter()
+            .any(|file| short_github_path(&file.path).starts_with(".github/workflows/"));
+        let missing_workflow_scope = has_workflow_files
+            && oauth_scopes
+                .map(|scopes| !scopes.contains("workflow"))
+                .unwrap_or(false);
 
         let mut bp_changes: Vec<BranchProtectionChange> = Vec::new();
         if let Some(cfg) = desired_settings.and_then(|s| s.branch_protection.as_ref()) {
@@ -157,6 +170,19 @@ async fn handle_repos(
 
         match mode {
             Mode::Plan => {
+                let workflow_warning = if missing_workflow_scope {
+                    "    Warning: token missing 'workflow' scope; .github/workflows updates will fail\n"
+                } else {
+                    ""
+                };
+                let branch_candidate = format!("{PR_BRANCH_PREFIX}{base_branch}");
+                let branch_blocked = if any_file_changes && existing_pr.is_none() {
+                    gh.get_branch_sha_optional(&repo_name, &branch_candidate)
+                        .await?
+                        .is_some()
+                } else {
+                    false
+                };
                 let (settings_count, settings_lines) = format_repo_settings(settings_diff.as_ref());
                 let (bp_count, bp_lines) = format_branch_protection(&bp_changes, verbose);
                 let (pr_note, pr_branch_display) = if any_file_changes {
@@ -169,11 +195,18 @@ async fn handle_repos(
                             ),
                             Some(branch),
                         )
+                    } else if branch_blocked {
+                        (
+                            format!(
+                                "cannot create PR for .github files because branch '{}' exists without an open PR; delete the branch and re-run",
+                                branch_candidate
+                            ),
+                            None,
+                        )
                     } else {
-                        let branch_name = format!("{PR_BRANCH_PREFIX}{base_branch}");
                         (
                             "draft PR will be created for .github file updates".to_string(),
-                            Some(branch_name),
+                            Some(branch_candidate),
                         )
                     }
                 } else if let Some(pr) = &existing_pr {
@@ -188,7 +221,7 @@ async fn handle_repos(
                     ("no PR (no .github file changes)".to_string(), None)
                 };
                 println!(
-                    "Repo {} (plan):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  PR:\n    {}{}\n    .github files add ({}) :{}\n    .github files update ({}) :{}\n    .github files remove ({}) :{}\n  Add labels ({}) :{}\n  Update labels ({}) :{}\n  Remove labels ({}) :{}\n  Blocked removals ({}) :{}",
+                    "Repo {} (plan):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  PR:\n    {}{}\n{}    .github files add ({}) :{}\n    .github files update ({}) :{}\n    .github files remove ({}) :{}\n  Add labels ({}) :{}\n  Update labels ({}) :{}\n  Remove labels ({}) :{}\n  Blocked removals ({}) :{}",
                     repo_name,
                     settings_count,
                     settings_lines,
@@ -197,8 +230,9 @@ async fn handle_repos(
                     pr_note,
                     pr_branch_display
                         .as_ref()
-                        .map(|b| format!(" on branch '{}'\n", b))
+                        .map(|b| format!(" on branch '{}'", b))
                         .unwrap_or_else(String::new),
+                    workflow_warning,
                     format_count(files_add.len(), ColorKind::Add),
                     format_github_lines(&files_add, ColorKind::Add),
                     format_count(files_update.len(), ColorKind::Update),
@@ -222,6 +256,11 @@ async fn handle_repos(
                 );
             }
             Mode::Apply => {
+                let workflow_warning = if missing_workflow_scope {
+                    "    Warning: token missing 'workflow' scope; .github/workflows updates will fail\n"
+                } else {
+                    ""
+                };
                 if let (Some(diff_settings), Some(desired)) = (&settings_diff, desired_settings)
                     && !diff_settings.changes.is_empty()
                 {
@@ -239,13 +278,21 @@ async fn handle_repos(
                 } else {
                     None
                 };
+                let branch_candidate = format!("{PR_BRANCH_PREFIX}{}", base_branch);
+                let branch_blocked = if any_file_changes && existing_pr.is_none() {
+                    gh.get_branch_sha_optional(&repo_name, &branch_candidate)
+                        .await?
+                        .is_some()
+                } else {
+                    false
+                };
                 let branch_name = if let Some(pr) = &existing_pr {
                     Some(pr.head.ref_field.clone())
-                } else if any_file_changes {
-                    let name = format!("{PR_BRANCH_PREFIX}{}", base_branch);
+                } else if any_file_changes && !branch_blocked {
                     let base_sha = gh.get_branch_sha(&repo_name, &base_branch).await?;
-                    gh.create_branch_from(&repo_name, &name, &base_sha).await?;
-                    Some(name)
+                    gh.create_branch_from(&repo_name, &branch_candidate, &base_sha)
+                        .await?;
+                    Some(branch_candidate.clone())
                 } else {
                     None
                 };
@@ -280,6 +327,11 @@ async fn handle_repos(
                         gh.delete_file(&repo_name, path, sha, &msg, Some(branch_ref))
                             .await?;
                     }
+                } else if branch_blocked && any_file_changes {
+                    println!(
+                        "Repo {} (apply): .github file updates skipped because branch '{}' exists without an open PR; delete the branch and re-run",
+                        repo_name, branch_candidate
+                    );
                 }
 
                 for label in &diff.to_add {
@@ -300,23 +352,26 @@ async fn handle_repos(
                 }
 
                 let mut pr_status = "no PR (no .github file changes)".to_string();
-                if let Some(branch) = branch_name.as_deref() {
+                if branch_blocked {
+                    pr_status = format!(
+                        "no PR created: branch '{}' exists without an open PR; delete the branch and re-run",
+                        branch_candidate
+                    );
+                } else if let Some(branch) = branch_name.as_deref() {
                     let pr_title =
                         format!("gh-governor updates ({})", Utc::now().format("%Y-%m-%d"));
                     let pr_body = Some("Automated .github updates via gh-governor");
                     let mut pr_opt = existing_pr;
                     if pr_opt.is_none() && any_file_changes {
-                        gh.create_pull_request(
-                            &repo_name,
-                            &pr_title,
-                            branch,
-                            &base_branch,
-                            pr_body,
-                            true,
-                        )
-                        .await?;
                         pr_opt = gh
-                            .find_open_pr_by_head_prefix(&repo_name, PR_BRANCH_PREFIX, &base_branch)
+                            .create_pull_request(
+                                &repo_name,
+                                &pr_title,
+                                branch,
+                                &base_branch,
+                                pr_body,
+                                true,
+                            )
                             .await?;
                     }
                     if let Some(pr) = pr_opt {
@@ -334,6 +389,11 @@ async fn handle_repos(
                             "draft PR #{} ({} -> {}) [{}]",
                             pr.number, branch, base_branch, url
                         );
+                    } else if any_file_changes {
+                        pr_status = format!(
+                            "no PR created: branch '{}' has no commits between {} and {} (delete the branch and re-run)",
+                            branch, base_branch, branch
+                        );
                     } else {
                         pr_status = format!(
                             "no PR created for branch '{}' (no changes to apply)",
@@ -345,13 +405,14 @@ async fn handle_repos(
                 let (settings_count, settings_lines) = format_repo_settings(settings_diff.as_ref());
                 let (bp_count, bp_lines) = format_branch_protection(&bp_changes, verbose);
                 println!(
-                    "Repo {} (apply):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  PR:\n    {}\n    .github files added ({}) :{}\n    .github files updated ({}) :{}\n    .github files removed ({}) :{}\n  Added labels ({}) :{}\n  Updated labels ({}) :{}\n  Removed labels ({}) :{}",
+                    "Repo {} (apply):\n  Repo settings changes ({}) :{}\n  Branch protection ({}) :{}\n  PR:\n    {}\n{}    .github files added ({}) :{}\n    .github files updated ({}) :{}\n    .github files removed ({}) :{}\n  Added labels ({}) :{}\n  Updated labels ({}) :{}\n  Removed labels ({}) :{}",
                     repo_name,
                     settings_count,
                     settings_lines,
                     bp_count,
                     bp_lines,
                     pr_status,
+                    workflow_warning,
                     format_count(files_add.len(), ColorKind::Add),
                     format_github_lines(&files_add, ColorKind::Add),
                     format_count(files_update.len(), ColorKind::Update),

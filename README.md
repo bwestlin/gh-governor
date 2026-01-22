@@ -1,4 +1,4 @@
-# Github government tooling
+# Github governing tooling
 <!-- markdownlint-disable MD036 -->
 
 `gh-governor` is a Rust CLI for managing many GitHub repositories in an org using shared configuration sets. It can plan and apply changes to labels, repo settings, branch protection, and files under `.github/`.

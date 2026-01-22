@@ -868,13 +868,9 @@ fn map_branch_protection_response(
 
 #[derive(serde::Serialize)]
 struct BranchProtectionRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
     required_status_checks: Option<RequiredStatusChecksRequest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    enforce_admins: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    enforce_admins: bool,
     required_pull_request_reviews: Option<RequiredPullRequestReviewsRequest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     restrictions: Option<BranchRestrictionsRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     allow_force_pushes: Option<bool>,
@@ -959,7 +955,7 @@ impl BranchProtectionRequest {
                     }),
                 }
             }),
-            enforce_admins: rule.enforce_admins,
+            enforce_admins: rule.enforce_admins.unwrap_or(false),
             required_pull_request_reviews: rule.required_pull_request_reviews.as_ref().map(|r| {
                 RequiredPullRequestReviewsRequest {
                     dismiss_stale_reviews: r.dismiss_stale_reviews,

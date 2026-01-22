@@ -1,10 +1,14 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
-use crate::error::{Error, Result};
-use crate::util::{SUPPORTED_EXTS, parse_by_extension};
+use crate::error::Error;
+use crate::error::Result;
+use crate::util::SUPPORTED_EXTS;
+use crate::util::parse_by_extension;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RepoConfig {

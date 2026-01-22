@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
-
-use gh_governor::app::{Mode, run};
-use gh_governor::config::{load_root_config, resolve_sets_dir};
+use clap::Parser;
+use clap::Subcommand;
+use clap::ValueEnum;
+use gh_governor::app::Mode;
+use gh_governor::app::run;
+use gh_governor::config::load_root_config;
+use gh_governor::config::resolve_sets_dir;
 use gh_governor::error::Result;
 use gh_governor::github::GithubClient;
 

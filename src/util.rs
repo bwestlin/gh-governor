@@ -2,7 +2,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 pub const SUPPORTED_EXTS: &[&str] = &["toml", "yml", "yaml", "json"];
 

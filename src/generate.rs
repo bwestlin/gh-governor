@@ -1,12 +1,18 @@
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use crate::config::{RepoConfig, RootConfig};
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::config::RepoConfig;
+use crate::config::RootConfig;
 use crate::error::Result;
 use crate::github::GithubClient;
-use crate::sets::{GithubFile, LabelSpec};
+use crate::sets::GithubFile;
+use crate::sets::LabelSpec;
 use crate::settings::RepoSettings;
 
 #[derive(Clone)]

@@ -1,16 +1,25 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 use chrono::Utc;
-use owo_colors::{OwoColorize, Stream};
-use serde::{Deserialize, Serialize};
+use owo_colors::OwoColorize;
+use owo_colors::Stream;
+use serde::Deserialize;
+use serde::Serialize;
 use tracing::info;
 
-use crate::diff::{RepoSettingsDiff, diff_labels, diff_repo_settings};
+use crate::diff::RepoSettingsDiff;
+use crate::diff::diff_labels;
+use crate::diff::diff_repo_settings;
 use crate::error::Result;
-use crate::github::{GithubClient, LabelUsageEntry};
-use crate::merge::{MergedRepoConfig, merge_sets_for_repo};
-use crate::sets::{GithubFile, LabelSpec, SetDefinition};
+use crate::github::GithubClient;
+use crate::github::LabelUsageEntry;
+use crate::merge::MergedRepoConfig;
+use crate::merge::merge_sets_for_repo;
+use crate::sets::GithubFile;
+use crate::sets::LabelSpec;
+use crate::sets::SetDefinition;
 use crate::settings::BranchProtectionRule;
 
 #[derive(Clone, Copy, Debug)]

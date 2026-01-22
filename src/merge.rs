@@ -2,11 +2,16 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use crate::sets::{ChecksConfig, GithubFile, LabelSpec, SetDefinition};
-use crate::settings::{
-    BranchProtectionRule, BranchRestrictions, RepoSettings, RequiredPullRequestReviews,
-    RequiredStatusChecks, ReviewDismissalRestrictions,
-};
+use crate::sets::ChecksConfig;
+use crate::sets::GithubFile;
+use crate::sets::LabelSpec;
+use crate::sets::SetDefinition;
+use crate::settings::BranchProtectionRule;
+use crate::settings::BranchRestrictions;
+use crate::settings::RepoSettings;
+use crate::settings::RequiredPullRequestReviews;
+use crate::settings::RequiredStatusChecks;
+use crate::settings::ReviewDismissalRestrictions;
 
 #[derive(Debug, Error)]
 pub enum MergeError {

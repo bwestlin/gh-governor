@@ -334,6 +334,21 @@ impl GithubClient {
         message: &str,
         branch: Option<&str>,
     ) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct PutContent {
+            path: String,
+            sha: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct PutCommit {
+            sha: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct PutResponse {
+            content: Option<PutContent>,
+            commit: Option<PutCommit>,
+        }
+
         #[derive(Serialize)]
         struct Body<'a> {
             message: &'a str,
@@ -351,10 +366,57 @@ impl GithubClient {
             branch,
         };
         let route = format!("/repos/{}/{}/contents/{}", self.org, repo, path);
-        self.inner
+        let response = self
+            .inner
             ._put(route, Some(&body))
             .await
             .map_err(|e| map_repo_error(&self.org, repo, e))?;
+        let status = response.status();
+        let body_bytes = match response.into_body().collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(err) => {
+                warn!(
+                    "failed to read put_file response for {}/{}:{}: {}",
+                    self.org, repo, path, err
+                );
+                return Ok(());
+            }
+        };
+        if body_bytes.is_empty() {
+            return Ok(());
+        }
+        if !status.is_success() {
+            let body_text = String::from_utf8_lossy(&body_bytes);
+            warn!(
+                "put_file response for {}/{}:{} failed (status {}, branch {:?}) body {}",
+                self.org, repo, path, status, branch, body_text
+            );
+            if status == http::StatusCode::NOT_FOUND && path.starts_with(".github/workflows/") {
+                warn!(
+                    "workflow file update for {}/{}:{} returned 404; the token likely needs the 'workflow' scope",
+                    self.org, repo, path
+                );
+            }
+        }
+        match serde_json::from_slice::<PutResponse>(&body_bytes) {
+            Ok(parsed) => {
+                if let Some(ref commit) = parsed.commit {
+                    debug!("wrote {}/{}:{} commit {}", self.org, repo, path, commit.sha);
+                }
+                if let Some(ref content) = parsed.content {
+                    debug!(
+                        "wrote {}/{}:{} content {}",
+                        self.org, repo, content.path, content.sha
+                    );
+                }
+            }
+            Err(err) => {
+                warn!(
+                    "failed to parse put_file response for {}/{}:{} (branch {:?}): {}",
+                    self.org, repo, path, branch, err
+                );
+            }
+        }
         Ok(())
     }
 
@@ -555,7 +617,7 @@ impl GithubClient {
             object: RefObject,
         }
 
-        let path = format!("/repos/{}/{}/git/ref/heads/{}", self.org, repo, branch);
+        let path = format!("/repos/{}/{}/git/refs/heads/{}", self.org, repo, branch);
         let resp: RefResp = self
             .inner
             .get(path, None::<&()>)
@@ -592,6 +654,32 @@ impl GithubClient {
         }
     }
 
+    pub async fn get_branch_sha_optional(
+        &self,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Option<String>> {
+        #[derive(serde::Deserialize)]
+        struct RefObject {
+            sha: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct RefResp {
+            object: RefObject,
+        }
+
+        let path = format!("/repos/{}/{}/git/refs/heads/{}", self.org, repo, branch);
+        match self.inner.get::<RefResp, _, _>(path, None::<&()>).await {
+            Ok(resp) => Ok(Some(resp.object.sha)),
+            Err(octocrab::Error::GitHub { ref source, .. })
+                if source.status_code == http::StatusCode::NOT_FOUND =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+        }
+    }
+
     pub async fn create_pull_request(
         &self,
         repo: &str,
@@ -600,7 +688,12 @@ impl GithubClient {
         base: &str,
         body: Option<&str>,
         draft: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<PullRequest>> {
+        let head_ref = if head.contains(':') {
+            head.to_string()
+        } else {
+            format!("{}:{}", self.org, head)
+        };
         #[derive(Serialize)]
         struct Body<'a> {
             title: &'a str,
@@ -612,18 +705,31 @@ impl GithubClient {
         }
         let body = Body {
             title,
-            head,
+            head: &head_ref,
             base,
             body,
             draft,
         };
         match self
             .inner
-            ._post(format!("/repos/{}/{}/pulls", self.org, repo), Some(&body))
+            .post(format!("/repos/{}/{}/pulls", self.org, repo), Some(&body))
             .await
         {
-            Ok(_) => Ok(()),
-            Err(e) => Err(map_repo_error(&self.org, repo, e)),
+            Ok(pr) => Ok(Some(pr)),
+            Err(err) => {
+                if let octocrab::Error::GitHub { source, .. } = &err
+                    && source.status_code == http::StatusCode::UNPROCESSABLE_ENTITY
+                    && source
+                        .errors
+                        .as_ref()
+                        .and_then(|errs| errs.iter().find_map(|entry| entry.get("message")))
+                        .and_then(|msg| msg.as_str())
+                        .is_some_and(|msg| msg.contains("No commits between"))
+                {
+                    return Ok(None);
+                }
+                Err(map_repo_error(&self.org, repo, err))
+            }
         }
     }
 

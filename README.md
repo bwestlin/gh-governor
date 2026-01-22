@@ -1,4 +1,4 @@
-# gh-governor
+# Github government tooling
 <!-- markdownlint-disable MD036 -->
 
 ## TODO

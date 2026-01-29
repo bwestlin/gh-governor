@@ -59,8 +59,24 @@ async fn handle_repos(
     verbose: bool,
     oauth_scopes: Option<&HashSet<String>>,
 ) -> Result<()> {
-    for (repo_name, merged_cfg) in merged {
+    for (idx, (repo_name, merged_cfg)) in merged.into_iter().enumerate() {
+        if idx > 0 {
+            println!("");
+            println!("---");
+            println!("");
+        }
         let repo_info = gh.get_repo(&repo_name).await?;
+        if repo_info.archived.unwrap_or(false) {
+            let mode_label = match mode {
+                Mode::Plan => "plan",
+                Mode::Apply => "apply",
+            };
+            println!(
+                "Repo {} ({}): Warning: repository is archived; skipping updates",
+                repo_name, mode_label
+            );
+            continue;
+        }
         let base_branch = repo_info
             .default_branch
             .clone()

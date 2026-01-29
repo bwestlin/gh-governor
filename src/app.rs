@@ -639,6 +639,21 @@ fn merge_branch_rule(
     if let Some(cur) = current {
         if merged.required_status_checks.is_none() {
             merged.required_status_checks = cur.required_status_checks.clone();
+        } else if let (Some(desired_sc), Some(cur_sc)) = (
+            merged.required_status_checks.as_ref(),
+            cur.required_status_checks.as_ref(),
+        ) {
+            let mut merged_sc = desired_sc.clone();
+            if merged_sc.strict.is_none() {
+                merged_sc.strict = cur_sc.strict;
+            }
+            if merged_sc.contexts.is_none() {
+                merged_sc.contexts = cur_sc.contexts.clone();
+            }
+            if merged_sc.checks.is_none() {
+                merged_sc.checks = cur_sc.checks.clone();
+            }
+            merged.required_status_checks = Some(merged_sc);
         }
         if merged.required_pull_request_reviews.is_none() {
             merged.required_pull_request_reviews = cur.required_pull_request_reviews.clone();

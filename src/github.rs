@@ -1121,8 +1121,15 @@ impl BranchProtectionRequest {
                 Some(list) if !list.is_empty() => None,
                 _ => c.contexts.clone(),
             };
+            let has_rules = checks.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
+                || contexts.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+            let strict = if has_rules {
+                Some(c.strict.unwrap_or(false))
+            } else {
+                c.strict
+            };
             RequiredStatusChecksRequest {
-                strict: c.strict,
+                strict,
                 contexts,
                 checks,
             }

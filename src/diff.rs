@@ -1,5 +1,7 @@
 use octocrab::models::Label;
 
+use std::collections::HashMap;
+
 use crate::sets::LabelSpec;
 use crate::settings::RepoSettings;
 
@@ -15,14 +17,20 @@ pub fn diff_labels(desired: &[LabelSpec], current: &[Label]) -> LabelDiff {
     let mut to_update = Vec::new();
     let mut to_remove = Vec::new();
 
+    let mut current_by_lower: HashMap<String, &Label> = HashMap::new();
+    for label in current {
+        current_by_lower.insert(label.name.to_lowercase(), label);
+    }
+
     for want in desired {
-        match current.iter().find(|c| c.name == want.name) {
+        let want_lower = want.name.to_lowercase();
+        match current_by_lower.get(&want_lower).copied() {
             None => to_add.push(want.clone()),
             Some(existing) => {
                 let same_color =
                     normalize_color(&Some(existing.color.clone())) == normalize_color(&want.color);
                 let same_desc = existing.description.as_deref() == want.description.as_deref();
-                if !same_color || !same_desc {
+                if !same_color || !same_desc || existing.name != want.name {
                     to_update.push(want.clone());
                 }
             }
@@ -30,7 +38,11 @@ pub fn diff_labels(desired: &[LabelSpec], current: &[Label]) -> LabelDiff {
     }
 
     for existing in current {
-        if !desired.iter().any(|d| d.name == existing.name) {
+        let existing_lower = existing.name.to_lowercase();
+        if !desired
+            .iter()
+            .any(|d| d.name.to_lowercase() == existing_lower)
+        {
             to_remove.push(LabelSpec {
                 name: existing.name.clone(),
                 color: normalize_color(&Some(existing.color.clone())),
@@ -203,6 +215,29 @@ mod tests {
         assert_eq!(diff.to_update[0].name, "bug");
         assert_eq!(diff.to_remove.len(), 1);
         assert_eq!(diff.to_remove[0].name, "old");
+    }
+
+    #[test]
+    fn matches_labels_case_insensitively() {
+        let desired = vec![lbl("Documentation", Some("00ff00"), Some("docs"))];
+        let current: Vec<Label> = serde_json::from_value(serde_json::json!([
+            {
+                "id": 1,
+                "node_id": "abc",
+                "url": "https://example.com",
+                "name": "documentation",
+                "color": "00ff00",
+                "default": false,
+                "description": "docs"
+            }
+        ]))
+        .unwrap();
+
+        let diff = diff_labels(&desired, &current);
+        assert!(diff.to_add.is_empty());
+        assert!(diff.to_remove.is_empty());
+        assert_eq!(diff.to_update.len(), 1);
+        assert_eq!(diff.to_update[0].name, "Documentation");
     }
 
     #[test]

@@ -61,9 +61,9 @@ async fn handle_repos(
 ) -> Result<()> {
     for (idx, (repo_name, merged_cfg)) in merged.into_iter().enumerate() {
         if idx > 0 {
-            println!("");
+            println!();
             println!("---");
-            println!("");
+            println!();
         }
         let repo_info = gh.get_repo(&repo_name).await?;
         if repo_info.archived.unwrap_or(false) {
@@ -72,8 +72,12 @@ async fn handle_repos(
                 Mode::Apply => "apply",
             };
             println!(
-                "Repo {} ({}): Warning: repository is archived; skipping updates",
-                repo_name, mode_label
+                "Repo {} ({}): {}",
+                repo_name,
+                mode_label,
+                "Warning: repository is archived; skipping updates"
+                    .yellow()
+                    .bold()
             );
             continue;
         }

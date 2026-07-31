@@ -95,8 +95,10 @@ Notes:
 
 - `GITHUB_TOKEN` must be set (classic PAT recommended).
 - Required scopes (classic PAT):
-  - Plan/Generate (read-only): `repo:read` (public) or `repo` (private), plus `read:org` if needed.
-  - Apply (write): `repo` + `admin:repo` (if your org requires admin to set branch protection).
+  - Plan/Generate (read-only): `repo` for private repositories, plus `read:org`
+    if needed. Public repositories do not require a repository scope for reads.
+  - Apply (write): `repo`; the token owner must also have repository admin
+    access to update settings such as branch protection.
   - Apply (workflows): add `workflow` if you manage `.github/workflows/*` files (the tool will warn if missing).
 - `plan` and `apply` use `--config-base` to select `toml`, `yml`, or `json` config directories.
 - `.github/ISSUE_TEMPLATE/config.yml` is synthesized when issue templates exist.

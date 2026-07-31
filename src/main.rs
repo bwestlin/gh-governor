@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::Parser;
 use clap::Subcommand;
@@ -84,7 +85,7 @@ impl From<OutputFormatArg> for gh_governor::generate::OutputFormat {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt()
@@ -93,6 +94,16 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    match run_command(args).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_command(args: Args) -> Result<()> {
     match args.command {
         Command::Plan { repos, config_base } => {
             let (root, root_path) = load_root_config(&config_base)?;

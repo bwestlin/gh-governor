@@ -12,49 +12,55 @@ pub enum Error {
         source: std::io::Error,
         path: String,
     },
-    #[error("failed to parse toml{path}: {source}")]
+    #[error("Failed to parse toml{path}: {source}")]
     Toml {
         #[source]
         source: toml::de::Error,
         path: String,
     },
-    #[error("failed to write toml: {0}")]
+    #[error("Failed to write toml: {0}")]
     TomlSer(#[from] toml::ser::Error),
-    #[error("failed to parse yaml{path}: {source}")]
+    #[error("Failed to parse yaml{path}: {source}")]
     Yaml {
         #[source]
         source: serde_yaml::Error,
         path: String,
     },
-    #[error("failed to parse json{path}: {source}")]
+    #[error("Failed to parse json{path}: {source}")]
     Json {
         #[source]
         source: serde_json::Error,
         path: String,
     },
-    #[error("unsupported config extension '{ext}' in {path}")]
+    #[error("Unsupported config extension '{ext}' in {path}")]
     UnsupportedExtension { ext: String, path: PathBuf },
     #[error(
-        "no main config file found at {base} (looked for gh-governor-conf.{{toml,yml,yaml,json}})"
+        "No main config file found at {base} (looked for gh-governor-conf.{{toml,yml,yaml,json}})"
     )]
     MissingConfig { base: PathBuf },
-    #[error("failed to serialize yaml: {0}")]
+    #[error("Failed to serialize yaml: {0}")]
     YamlSer(#[from] serde_yaml::Error),
-    #[error("failed to serialize json: {0}")]
+    #[error("Failed to serialize json: {0}")]
     JsonSer(#[from] serde_json::Error),
-    #[error("glob pattern error: {0}")]
+    #[error("Glob pattern error: {0}")]
     GlobPattern(#[from] glob::PatternError),
-    #[error("glob error reading paths: {0}")]
+    #[error("Glob error reading paths: {0}")]
     GlobGlob(#[from] glob::GlobError),
-    #[error("github api error: {0}")]
+    #[error("GitHub API error: {0}")]
     Octo(Box<octocrab::Error>),
-    #[error("repository '{org}/{repo}' not found")]
+    #[error(
+        "Repository '{org}/{repo}' was not found or the token cannot access it; verify the repository name, token repository access/scopes, and organization SSO authorization"
+    )]
     RepoNotFound { org: String, repo: String },
-    #[error("repo '{repo}' has conflicting config: {reason}")]
+    #[error(
+        "GitHub authentication failed: the token is invalid, expired, or revoked; update --token or GITHUB_TOKEN"
+    )]
+    AuthenticationFailed,
+    #[error("Repo '{repo}' has conflicting config: {reason}")]
     MergeConflict { repo: String, reason: String },
     #[error("I/O error: {0}")]
     IoSimple(#[from] std::io::Error),
-    #[error("invalid arguments: {0}")]
+    #[error("Invalid arguments: {0}")]
     InvalidArgs(String),
 }
 
@@ -90,6 +96,11 @@ impl Error {
 
 impl From<octocrab::Error> for Error {
     fn from(err: octocrab::Error) -> Self {
+        if let octocrab::Error::GitHub { source, .. } = &err
+            && source.status_code == http::StatusCode::UNAUTHORIZED
+        {
+            return Error::AuthenticationFailed;
+        }
         Error::Octo(Box::new(err))
     }
 }

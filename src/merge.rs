@@ -207,8 +207,8 @@ fn merge_required_status_checks(
 ) -> Result<RequiredStatusChecks, String> {
     Ok(RequiredStatusChecks {
         strict: merge_option_field(current.strict, incoming.strict, "strict")?,
-        contexts: merge_option_vec(current.contexts, incoming.contexts, "contexts")?,
-        checks: merge_option_vec(current.checks, incoming.checks, "checks")?,
+        contexts: merge_option_vec(current.contexts, incoming.contexts),
+        checks: merge_option_vec(current.checks, incoming.checks),
     })
 }
 
@@ -251,8 +251,8 @@ fn merge_review_dismissal_restrictions(
     incoming: ReviewDismissalRestrictions,
 ) -> Result<ReviewDismissalRestrictions, String> {
     Ok(ReviewDismissalRestrictions {
-        users: merge_option_vec(current.users, incoming.users, "users")?,
-        teams: merge_option_vec(current.teams, incoming.teams, "teams")?,
+        users: merge_option_vec(current.users, incoming.users),
+        teams: merge_option_vec(current.teams, incoming.teams),
     })
 }
 
@@ -261,9 +261,9 @@ fn merge_branch_restrictions(
     incoming: BranchRestrictions,
 ) -> Result<BranchRestrictions, String> {
     Ok(BranchRestrictions {
-        users: merge_option_vec(current.users, incoming.users, "users")?,
-        teams: merge_option_vec(current.teams, incoming.teams, "teams")?,
-        apps: merge_option_vec(current.apps, incoming.apps, "apps")?,
+        users: merge_option_vec(current.users, incoming.users),
+        teams: merge_option_vec(current.teams, incoming.teams),
+        apps: merge_option_vec(current.apps, incoming.apps),
     })
 }
 
@@ -283,13 +283,22 @@ fn merge_option_field<T: PartialEq + Copy>(
 fn merge_option_vec<T: PartialEq>(
     current: Option<Vec<T>>,
     incoming: Option<Vec<T>>,
-    field: &str,
-) -> Result<Option<Vec<T>>, String> {
+) -> Option<Vec<T>> {
     match (current, incoming) {
-        (None, v) => Ok(v),
-        (v, None) => Ok(v),
-        (Some(a), Some(b)) if a == b => Ok(Some(a)),
-        (Some(_), Some(_)) => Err(format!("conflict on {}", field)),
+        (None, None) => None,
+        (current, incoming) => {
+            let mut merged = Vec::new();
+            for item in current
+                .into_iter()
+                .flatten()
+                .chain(incoming.into_iter().flatten())
+            {
+                if !merged.contains(&item) {
+                    merged.push(item);
+                }
+            }
+            Some(merged)
+        }
     }
 }
 
@@ -336,6 +345,12 @@ mod tests {
             repo_settings: None,
             checks: None,
         }
+    }
+
+    fn set_with_repo_settings(name: &str, config: &str) -> SetDefinition {
+        let mut set = base_set(name);
+        set.repo_settings = Some(toml::from_str(config).unwrap());
+        set
     }
 
     #[test]
@@ -408,5 +423,108 @@ mod tests {
         });
         let merged = merge_sets_for_repo(&[a, b]).unwrap();
         assert_eq!(merged.github_files.len(), 1);
+    }
+
+    #[test]
+    fn unions_required_status_checks_from_multiple_sets() {
+        let title_check = set_with_repo_settings(
+            "title-check",
+            r#"
+[[branch_protection.rules]]
+pattern = "main"
+
+[branch_protection.rules.required_status_checks]
+contexts = ["check-title / check-title"]
+
+[[branch_protection.rules.required_status_checks.checks]]
+context = "check-title / check-title"
+app_id = 15368
+"#,
+        );
+        let gate = set_with_repo_settings(
+            "gate",
+            r#"
+[[branch_protection.rules]]
+pattern = "main"
+
+[branch_protection.rules.required_status_checks]
+contexts = ["gate"]
+
+[[branch_protection.rules.required_status_checks.checks]]
+context = "gate"
+app_id = 15368
+"#,
+        );
+
+        let merged = merge_sets_for_repo(&[title_check, gate]).unwrap();
+        let status_checks = merged
+            .repo_settings
+            .unwrap()
+            .branch_protection
+            .unwrap()
+            .rules
+            .remove(0)
+            .required_status_checks
+            .unwrap();
+
+        assert_eq!(
+            status_checks.contexts.unwrap(),
+            vec!["check-title / check-title", "gate"]
+        );
+        assert_eq!(
+            status_checks
+                .checks
+                .unwrap()
+                .into_iter()
+                .map(|check| (check.context, check.app_id))
+                .collect::<Vec<_>>(),
+            vec![
+                ("check-title / check-title".to_string(), Some(15368)),
+                ("gate".to_string(), Some(15368)),
+            ]
+        );
+    }
+
+    #[test]
+    fn additive_list_merge_preserves_order_and_removes_duplicates() {
+        assert_eq!(
+            merge_option_vec(
+                Some(vec!["check-title", "gate", "check-title"]),
+                Some(vec!["gate", "security"]),
+            ),
+            Some(vec!["check-title", "gate", "security"])
+        );
+    }
+
+    #[test]
+    fn still_rejects_conflicting_scalar_branch_protection_settings() {
+        let strict = set_with_repo_settings(
+            "strict",
+            r#"
+[[branch_protection.rules]]
+pattern = "main"
+
+[branch_protection.rules.required_status_checks]
+strict = true
+"#,
+        );
+        let not_strict = set_with_repo_settings(
+            "not-strict",
+            r#"
+[[branch_protection.rules]]
+pattern = "main"
+
+[branch_protection.rules.required_status_checks]
+strict = false
+"#,
+        );
+
+        let error = merge_sets_for_repo(&[strict, not_strict]).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "repo settings (branch protection): required_status_checks: conflict on strict \
+             conflict between sets"
+        );
     }
 }

@@ -17,6 +17,12 @@
 - **Repos**: Each repo lists which sets it uses (plus optional defaults).
 - **Plan vs apply**: `plan` shows changes; `apply` performs changes.
 
+When multiple sets configure the same branch-protection rule, list-valued fields
+are additive. Status-check contexts and checks, review-dismissal users and teams,
+and push-restriction users, teams, and apps are combined as a stable union in set
+order. Exact duplicates are included only once. Scalar fields must still be equal
+when specified by multiple sets; differing values remain a configuration conflict.
+
 ## Configuration
 
 The main config file is named `gh-governor-conf.{toml,yml,json}` and looks like:

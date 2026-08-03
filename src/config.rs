@@ -13,8 +13,19 @@ use crate::util::parse_by_extension;
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RepoConfig {
     pub name: String,
+    /// Whether organization-wide default sets are applied before this repository's sets.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub inherit_default_sets: bool,
     #[serde(default)]
     pub sets: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Root configuration read from `gh-governor-conf.{toml,yml,yaml,json}`.
@@ -31,6 +42,15 @@ pub struct RootConfig {
     /// Optional directory for configuration sets (relative to base); defaults to `config-sets/`.
     #[serde(default)]
     pub config_sets_dir: Option<String>,
+}
+
+impl RootConfig {
+    pub fn sets_for_repo<'a>(&'a self, repo: &'a RepoConfig) -> impl Iterator<Item = &'a String> {
+        self.default_sets
+            .iter()
+            .filter(move |_| repo.inherit_default_sets)
+            .chain(repo.sets.iter())
+    }
 }
 
 const MAIN_CONFIG_BASENAME: &str = "gh-governor-conf";
@@ -59,4 +79,80 @@ fn find_main_config(base: &Path) -> Result<PathBuf> {
     Err(Error::MissingConfig {
         base: base.to_path_buf(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repos_inherit_default_sets_by_default() {
+        let config: RootConfig = toml::from_str(
+            r#"
+org = "example"
+default_sets = ["core"]
+
+[[repos]]
+name = "api"
+sets = ["api"]
+"#,
+        )
+        .unwrap();
+
+        assert!(config.repos[0].inherit_default_sets);
+        assert_eq!(
+            config
+                .sets_for_repo(&config.repos[0])
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["core", "api"]
+        );
+    }
+
+    #[test]
+    fn repo_can_disable_default_set_inheritance() {
+        let config: RootConfig = toml::from_str(
+            r#"
+org = "example"
+default_sets = ["core"]
+
+[[repos]]
+name = "infra"
+inherit_default_sets = false
+sets = ["infra"]
+"#,
+        )
+        .unwrap();
+
+        assert!(!config.repos[0].inherit_default_sets);
+        assert_eq!(
+            config
+                .sets_for_repo(&config.repos[0])
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["infra"]
+        );
+    }
+
+    #[test]
+    fn serialization_only_includes_disabled_inheritance() {
+        let mut repo = RepoConfig {
+            name: "infra".to_string(),
+            inherit_default_sets: true,
+            sets: vec!["infra".to_string()],
+        };
+
+        assert!(
+            !toml::to_string(&repo)
+                .unwrap()
+                .contains("inherit_default_sets")
+        );
+
+        repo.inherit_default_sets = false;
+        assert!(
+            toml::to_string(&repo)
+                .unwrap()
+                .contains("inherit_default_sets = false")
+        );
+    }
 }

@@ -38,7 +38,17 @@ sets = ["strict-protection"]
 [[repos]]
 name = "repo2"
 sets = ["docs"]
+
+[[repos]]
+name = "repo-without-defaults"
+inherit_default_sets = false
+sets = ["specialized"]
 ```
+
+By default, each repository inherits `default_sets` before its own `sets` are
+applied. Set `inherit_default_sets = false` on a repository to apply only that
+repository's `sets`. This replaces the inherited set list; individual settings
+within an inherited set cannot be overridden by a later set.
 
 Each set lives under `config-sets/<set-name>/` and can include:
 

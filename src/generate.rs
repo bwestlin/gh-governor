@@ -189,6 +189,7 @@ pub async fn generate_configs(
         }
         root.repos.push(RepoConfig {
             name: repo_name,
+            inherit_default_sets: true,
             sets,
         });
     }

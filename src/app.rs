@@ -1218,7 +1218,7 @@ fn prepare_merged(
         }
 
         let mut set_defs = Vec::new();
-        for set_name in root.default_sets.iter().chain(repo.sets.iter()) {
+        for set_name in root.sets_for_repo(repo) {
             if !set_cache.contains_key(set_name) {
                 let loaded = crate::sets::load_set(sets_dir, set_name)?;
                 set_cache.insert(set_name.clone(), loaded);

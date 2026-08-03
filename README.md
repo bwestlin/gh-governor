@@ -20,8 +20,10 @@
 When multiple sets configure the same branch-protection rule, list-valued fields
 are additive. Status-check contexts and checks, review-dismissal users and teams,
 and push-restriction users, teams, and apps are combined as a stable union in set
-order. Exact duplicates are included only once. Scalar fields must still be equal
-when specified by multiple sets; differing values remain a configuration conflict.
+order. Exact duplicates are included only once. Scalar fields left unset in one
+set can be supplied by another set. Scalar fields explicitly set to different
+values remain a configuration conflict. Pull-request settings use the same
+field-by-field scalar merge behavior.
 
 ## Configuration
 

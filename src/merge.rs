@@ -40,77 +40,78 @@ fn format_set_names(names: &[String]) -> String {
     }
 }
 
-fn option_value<T: std::fmt::Debug>(value: &Option<T>) -> String {
-    match value {
-        Some(value) => format!("{:?}", value),
-        None => "<unset>".to_string(),
-    }
-}
-
-fn differing_field<T: std::fmt::Debug + PartialEq>(
-    differences: &mut Vec<String>,
+fn merge_pull_request_field<T: std::fmt::Debug + PartialEq>(
+    current: Option<T>,
+    incoming: Option<T>,
     field: &str,
-    existing: &Option<T>,
-    incoming: &Option<T>,
-) {
-    if existing != incoming {
-        differences.push(format!(
-            "{}: {} vs {}",
-            field,
-            option_value(existing),
-            option_value(incoming)
-        ));
+    conflicts: &mut Vec<String>,
+) -> Option<T> {
+    match (current, incoming) {
+        (None, value) => value,
+        (value, None) => value,
+        (Some(current), Some(incoming)) if current == incoming => Some(current),
+        (Some(current), Some(incoming)) => {
+            conflicts.push(format!("{}: {:?} vs {:?}", field, current, incoming));
+            Some(current)
+        }
     }
 }
 
-fn pull_request_conflict_details(
-    existing: &PullRequestSettings,
-    incoming: &PullRequestSettings,
-) -> String {
-    let mut differences = Vec::new();
-    differing_field(
-        &mut differences,
-        "allow_merge_commit",
-        &existing.allow_merge_commit,
-        &incoming.allow_merge_commit,
-    );
-    differing_field(
-        &mut differences,
-        "allow_squash_merge",
-        &existing.allow_squash_merge,
-        &incoming.allow_squash_merge,
-    );
-    differing_field(
-        &mut differences,
-        "allow_rebase_merge",
-        &existing.allow_rebase_merge,
-        &incoming.allow_rebase_merge,
-    );
-    differing_field(
-        &mut differences,
-        "allow_auto_merge",
-        &existing.allow_auto_merge,
-        &incoming.allow_auto_merge,
-    );
-    differing_field(
-        &mut differences,
-        "delete_branch_on_merge",
-        &existing.delete_branch_on_merge,
-        &incoming.delete_branch_on_merge,
-    );
-    differing_field(
-        &mut differences,
-        "merge_commit_message_option",
-        &existing.merge_commit_message_option,
-        &incoming.merge_commit_message_option,
-    );
-    differing_field(
-        &mut differences,
-        "squash_merge_option",
-        &existing.squash_merge_option,
-        &incoming.squash_merge_option,
-    );
-    differences.join("\n      - ")
+fn merge_pull_request_settings(
+    current: PullRequestSettings,
+    incoming: PullRequestSettings,
+) -> Result<PullRequestSettings, String> {
+    let mut conflicts = Vec::new();
+    let merged = PullRequestSettings {
+        allow_merge_commit: merge_pull_request_field(
+            current.allow_merge_commit,
+            incoming.allow_merge_commit,
+            "allow_merge_commit",
+            &mut conflicts,
+        ),
+        allow_squash_merge: merge_pull_request_field(
+            current.allow_squash_merge,
+            incoming.allow_squash_merge,
+            "allow_squash_merge",
+            &mut conflicts,
+        ),
+        allow_rebase_merge: merge_pull_request_field(
+            current.allow_rebase_merge,
+            incoming.allow_rebase_merge,
+            "allow_rebase_merge",
+            &mut conflicts,
+        ),
+        allow_auto_merge: merge_pull_request_field(
+            current.allow_auto_merge,
+            incoming.allow_auto_merge,
+            "allow_auto_merge",
+            &mut conflicts,
+        ),
+        delete_branch_on_merge: merge_pull_request_field(
+            current.delete_branch_on_merge,
+            incoming.delete_branch_on_merge,
+            "delete_branch_on_merge",
+            &mut conflicts,
+        ),
+        merge_commit_message_option: merge_pull_request_field(
+            current.merge_commit_message_option,
+            incoming.merge_commit_message_option,
+            "merge_commit_message_option",
+            &mut conflicts,
+        ),
+        squash_merge_option: merge_pull_request_field(
+            current.squash_merge_option,
+            incoming.squash_merge_option,
+            "squash_merge_option",
+            &mut conflicts,
+        ),
+    };
+
+    if conflicts.is_empty() {
+        Ok(merged)
+    } else {
+        Err(conflicts.join("\n      - "))
+    }
 }
 
 fn checks_conflict_details(existing: &ChecksConfig, incoming: &ChecksConfig) -> String {
@@ -228,22 +229,26 @@ fn merge_repo_settings(
             Ok(Some(incoming))
         }
         Some(mut current) => {
-            // Merge pull request settings only if they don't conflict.
-            match (&current.pull_requests, &incoming.pull_requests) {
-                (None, Some(pr)) => {
-                    current.pull_requests = Some(pr.clone());
+            // Merge pull request settings field-by-field; unset fields don't conflict.
+            match (&mut current.pull_requests, incoming.pull_requests) {
+                (slot @ None, Some(pr)) => {
+                    *slot = Some(pr);
                     pull_request_sets.push(incoming_set.to_string());
                 }
                 (Some(_), None) => {}
-                (Some(a), Some(b)) if a != b => {
-                    return Err(MergeError::GenericConflict(format!(
-                        "repo settings (pull requests):\n    conflicting sets: {} and set '{}'\n    differing values:\n      - {}",
-                        format_set_names(pull_request_sets),
-                        incoming_set,
-                        pull_request_conflict_details(a, b)
-                    )));
+                (Some(current), Some(incoming)) => {
+                    *current = merge_pull_request_settings(current.clone(), incoming).map_err(
+                        |details| {
+                            MergeError::GenericConflict(format!(
+                                "repo settings (pull requests):\n    conflicting sets: {} and set '{}'\n    differing values:\n      - {}",
+                                format_set_names(pull_request_sets),
+                                incoming_set,
+                                details
+                            ))
+                        },
+                    )?;
+                    pull_request_sets.push(incoming_set.to_string());
                 }
-                (Some(_), Some(_)) => pull_request_sets.push(incoming_set.to_string()),
                 (None, None) => {}
             }
 
@@ -560,16 +565,39 @@ mod tests {
     }
 
     #[test]
+    fn merges_pull_request_fields_when_other_set_leaves_them_unset() {
+        let core = set_with_repo_settings(
+            "core",
+            r#"
+[pull_requests]
+delete_branch_on_merge = true
+"#,
+        );
+        let infra = set_with_repo_settings(
+            "infra",
+            r#"
+[pull_requests]
+allow_squash_merge = false
+allow_rebase_merge = true
+"#,
+        );
+
+        let merged = merge_sets_for_repo(&[core, infra]).unwrap();
+        let pull_requests = merged.repo_settings.unwrap().pull_requests.unwrap();
+
+        assert_eq!(pull_requests.allow_squash_merge, Some(false));
+        assert_eq!(pull_requests.allow_rebase_merge, Some(true));
+        assert_eq!(pull_requests.delete_branch_on_merge, Some(true));
+    }
+
+    #[test]
     fn pull_request_conflict_names_sets_fields_and_values() {
         let core = set_with_repo_settings(
             "core",
             r#"
 [pull_requests]
-allow_merge_commit = false
 allow_squash_merge = true
 allow_rebase_merge = false
-allow_auto_merge = true
-delete_branch_on_merge = true
 "#,
         );
         let infra = set_with_repo_settings(
@@ -590,10 +618,8 @@ allow_rebase_merge = true
         assert_eq!(
             error.to_string(),
             "Repo 'infra' has conflicting config:\n  repo settings (pull requests):\n    conflicting \
-             sets: set 'core' and set 'infra'\n    differing values:\n      - allow_merge_commit: \
-             false vs <unset>\n      - allow_squash_merge: true vs false\n      - \
-             allow_rebase_merge: false vs true\n      - allow_auto_merge: true vs <unset>\n      \
-             - delete_branch_on_merge: true vs <unset>"
+             sets: set 'core' and set 'infra'\n    differing values:\n      - allow_squash_merge: \
+             true vs false\n      - allow_rebase_merge: false vs true"
         );
     }
 

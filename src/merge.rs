@@ -8,6 +8,7 @@ use crate::sets::LabelSpec;
 use crate::sets::SetDefinition;
 use crate::settings::BranchProtectionRule;
 use crate::settings::BranchRestrictions;
+use crate::settings::PullRequestSettings;
 use crate::settings::RepoSettings;
 use crate::settings::RequiredPullRequestReviews;
 use crate::settings::RequiredStatusChecks;
@@ -19,11 +20,115 @@ pub enum MergeError {
     LabelConflict(String),
     #[error(".github file conflict for '{0}' between sets")]
     TemplateConflict(String),
-    #[error("{0} conflict between sets")]
+    #[error("{0}")]
     GenericConflict(String),
 }
 
 pub type MergeResult<T> = Result<T, MergeError>;
+
+fn format_set_names(names: &[String]) -> String {
+    match names {
+        [name] => format!("set '{}'", name),
+        _ => format!(
+            "sets {}",
+            names
+                .iter()
+                .map(|name| format!("'{}'", name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn option_value<T: std::fmt::Debug>(value: &Option<T>) -> String {
+    match value {
+        Some(value) => format!("{:?}", value),
+        None => "<unset>".to_string(),
+    }
+}
+
+fn differing_field<T: std::fmt::Debug + PartialEq>(
+    differences: &mut Vec<String>,
+    field: &str,
+    existing: &Option<T>,
+    incoming: &Option<T>,
+) {
+    if existing != incoming {
+        differences.push(format!(
+            "{}: {} vs {}",
+            field,
+            option_value(existing),
+            option_value(incoming)
+        ));
+    }
+}
+
+fn pull_request_conflict_details(
+    existing: &PullRequestSettings,
+    incoming: &PullRequestSettings,
+) -> String {
+    let mut differences = Vec::new();
+    differing_field(
+        &mut differences,
+        "allow_merge_commit",
+        &existing.allow_merge_commit,
+        &incoming.allow_merge_commit,
+    );
+    differing_field(
+        &mut differences,
+        "allow_squash_merge",
+        &existing.allow_squash_merge,
+        &incoming.allow_squash_merge,
+    );
+    differing_field(
+        &mut differences,
+        "allow_rebase_merge",
+        &existing.allow_rebase_merge,
+        &incoming.allow_rebase_merge,
+    );
+    differing_field(
+        &mut differences,
+        "allow_auto_merge",
+        &existing.allow_auto_merge,
+        &incoming.allow_auto_merge,
+    );
+    differing_field(
+        &mut differences,
+        "delete_branch_on_merge",
+        &existing.delete_branch_on_merge,
+        &incoming.delete_branch_on_merge,
+    );
+    differing_field(
+        &mut differences,
+        "merge_commit_message_option",
+        &existing.merge_commit_message_option,
+        &incoming.merge_commit_message_option,
+    );
+    differing_field(
+        &mut differences,
+        "squash_merge_option",
+        &existing.squash_merge_option,
+        &incoming.squash_merge_option,
+    );
+    differences.join("\n      - ")
+}
+
+fn checks_conflict_details(existing: &ChecksConfig, incoming: &ChecksConfig) -> String {
+    let mut differences = Vec::new();
+    if existing.require_codeowners != incoming.require_codeowners {
+        differences.push(format!(
+            "require_codeowners: {} vs {}",
+            existing.require_codeowners, incoming.require_codeowners
+        ));
+    }
+    if existing.warn_on_inactive_owners != incoming.warn_on_inactive_owners {
+        differences.push(format!(
+            "warn_on_inactive_owners: {} vs {}",
+            existing.warn_on_inactive_owners, incoming.warn_on_inactive_owners
+        ));
+    }
+    differences.join("\n      - ")
+}
 
 #[derive(Debug, Clone)]
 pub struct MergedRepoConfig {
@@ -37,7 +142,9 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
     let mut labels = HashMap::new();
     let mut github_files = HashMap::new();
     let mut repo_settings: Option<RepoSettings> = None;
-    let mut checks: Option<ChecksConfig> = None;
+    let mut repo_settings_sets = Vec::new();
+    let mut pull_request_sets = Vec::new();
+    let mut checks: Option<(ChecksConfig, String)> = None;
 
     for set in sets {
         for label in &set.labels {
@@ -64,11 +171,29 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
         }
 
         if let Some(settings) = &set.repo_settings {
-            repo_settings = merge_repo_settings(repo_settings, settings.clone())?;
+            repo_settings = merge_repo_settings(
+                repo_settings,
+                settings.clone(),
+                &repo_settings_sets,
+                &mut pull_request_sets,
+                &set.name,
+            )?;
+            repo_settings_sets.push(set.name.clone());
         }
 
         if let Some(chk) = &set.checks {
-            checks = merge_or_conflict(checks, chk.clone(), "checks")?;
+            match &checks {
+                Some((current, existing_set)) if current != chk => {
+                    return Err(MergeError::GenericConflict(format!(
+                        "checks:\n    conflicting sets: set '{}' and set '{}'\n    differing values:\n      - {}",
+                        existing_set,
+                        set.name,
+                        checks_conflict_details(current, chk)
+                    )));
+                }
+                Some(_) => {}
+                None => checks = Some((chk.clone(), set.name.clone())),
+            }
         }
     }
 
@@ -84,27 +209,42 @@ pub fn merge_sets_for_repo(sets: &[SetDefinition]) -> MergeResult<MergedRepoConf
             v
         },
         repo_settings,
-        checks,
+        checks: checks.map(|(checks, _)| checks),
     })
 }
 
 fn merge_repo_settings(
     existing: Option<RepoSettings>,
     incoming: RepoSettings,
+    existing_sets: &[String],
+    pull_request_sets: &mut Vec<String>,
+    incoming_set: &str,
 ) -> MergeResult<Option<RepoSettings>> {
     match existing {
-        None => Ok(Some(incoming)),
+        None => {
+            if incoming.pull_requests.is_some() {
+                pull_request_sets.push(incoming_set.to_string());
+            }
+            Ok(Some(incoming))
+        }
         Some(mut current) => {
             // Merge pull request settings only if they don't conflict.
             match (&current.pull_requests, &incoming.pull_requests) {
-                (None, Some(pr)) => current.pull_requests = Some(pr.clone()),
+                (None, Some(pr)) => {
+                    current.pull_requests = Some(pr.clone());
+                    pull_request_sets.push(incoming_set.to_string());
+                }
                 (Some(_), None) => {}
                 (Some(a), Some(b)) if a != b => {
-                    return Err(MergeError::GenericConflict(
-                        "repo settings (pull requests)".to_string(),
-                    ));
+                    return Err(MergeError::GenericConflict(format!(
+                        "repo settings (pull requests):\n    conflicting sets: {} and set '{}'\n    differing values:\n      - {}",
+                        format_set_names(pull_request_sets),
+                        incoming_set,
+                        pull_request_conflict_details(a, b)
+                    )));
                 }
-                _ => {}
+                (Some(_), Some(_)) => pull_request_sets.push(incoming_set.to_string()),
+                (None, None) => {}
             }
 
             // Merge branch protection rules by pattern; merge non-overlapping fields.
@@ -118,7 +258,10 @@ fn merge_repo_settings(
                                 *existing_rule =
                                     merge_branch_rule(existing_rule, rule).map_err(|e| {
                                         MergeError::GenericConflict(format!(
-                                            "repo settings (branch protection): {}",
+                                            "repo settings (branch protection):\n    conflicting sets: {} and set '{}'\n    rule: '{}'\n    conflict: {}",
+                                            format_set_names(existing_sets),
+                                            incoming_set,
+                                            existing_rule.pattern,
                                             e
                                         ))
                                     })?;
@@ -267,7 +410,7 @@ fn merge_branch_restrictions(
     })
 }
 
-fn merge_option_field<T: PartialEq + Copy>(
+fn merge_option_field<T: std::fmt::Debug + PartialEq + Copy>(
     current: Option<T>,
     incoming: Option<T>,
     field: &str,
@@ -276,7 +419,10 @@ fn merge_option_field<T: PartialEq + Copy>(
         (None, v) => Ok(v),
         (v, None) => Ok(v),
         (Some(a), Some(b)) if a == b => Ok(Some(a)),
-        (Some(_), Some(_)) => Err(format!("conflict on {}", field)),
+        (Some(a), Some(b)) => Err(format!(
+            "{} is {:?} in the previously merged configuration vs {:?} in the incoming set",
+            field, a, b
+        )),
     }
 }
 
@@ -319,18 +465,6 @@ where
             .map_err(|e| format!("{}: {}", field, e)),
     }
 }
-fn merge_or_conflict<T: PartialEq>(
-    existing: Option<T>,
-    incoming: T,
-    what: &str,
-) -> MergeResult<Option<T>> {
-    match existing {
-        Some(current) if current != incoming => Err(MergeError::GenericConflict(what.to_string())),
-        Some(current) => Ok(Some(current)),
-        None => Ok(Some(incoming)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +557,44 @@ mod tests {
         });
         let merged = merge_sets_for_repo(&[a, b]).unwrap();
         assert_eq!(merged.github_files.len(), 1);
+    }
+
+    #[test]
+    fn pull_request_conflict_names_sets_fields_and_values() {
+        let core = set_with_repo_settings(
+            "core",
+            r#"
+[pull_requests]
+allow_merge_commit = false
+allow_squash_merge = true
+allow_rebase_merge = false
+allow_auto_merge = true
+delete_branch_on_merge = true
+"#,
+        );
+        let infra = set_with_repo_settings(
+            "infra",
+            r#"
+[pull_requests]
+allow_squash_merge = false
+allow_rebase_merge = true
+"#,
+        );
+
+        let reason = merge_sets_for_repo(&[core, infra]).unwrap_err().to_string();
+        let error = crate::error::Error::MergeConflict {
+            repo: "infra".to_string(),
+            reason,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "Repo 'infra' has conflicting config:\n  repo settings (pull requests):\n    conflicting \
+             sets: set 'core' and set 'infra'\n    differing values:\n      - allow_merge_commit: \
+             false vs <unset>\n      - allow_squash_merge: true vs false\n      - \
+             allow_rebase_merge: false vs true\n      - allow_auto_merge: true vs <unset>\n      \
+             - delete_branch_on_merge: true vs <unset>"
+        );
     }
 
     #[test]
@@ -523,8 +695,9 @@ strict = false
 
         assert_eq!(
             error.to_string(),
-            "repo settings (branch protection): required_status_checks: conflict on strict \
-             conflict between sets"
+            "repo settings (branch protection):\n    conflicting sets: set 'strict' and set \
+             'not-strict'\n    rule: 'main'\n    conflict: required_status_checks: strict is true in \
+             the previously merged configuration vs false in the incoming set"
         );
     }
 }

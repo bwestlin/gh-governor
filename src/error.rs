@@ -56,7 +56,7 @@ pub enum Error {
         "GitHub authentication failed: the token is invalid, expired, or revoked; update --token or GITHUB_TOKEN"
     )]
     AuthenticationFailed,
-    #[error("Repo '{repo}' has conflicting config: {reason}")]
+    #[error("Repo '{repo}' has conflicting config:\n  {reason}")]
     MergeConflict { repo: String, reason: String },
     #[error("I/O error: {0}")]
     IoSimple(#[from] std::io::Error),

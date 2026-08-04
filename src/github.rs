@@ -837,9 +837,21 @@ impl GithubClient {
         title: &str,
         body: Option<&str>,
     ) -> Result<()> {
+        self.update_pull_request_fields(repo, number, Some(title), body)
+            .await
+    }
+
+    pub async fn update_pull_request_fields(
+        &self,
+        repo: &str,
+        number: u64,
+        title: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<()> {
         #[derive(Serialize)]
         struct Body<'a> {
-            title: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            title: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             body: Option<&'a str>,
         }
@@ -855,6 +867,66 @@ impl GithubClient {
             Ok(_) => Ok(()),
             Err(e) => Err(map_repo_error(&self.org, repo, e)),
         }
+    }
+
+    pub async fn update_pull_request_draft(
+        &self,
+        repo: &str,
+        number: u64,
+        node_id: Option<&str>,
+        draft: bool,
+    ) -> Result<()> {
+        let node_id = node_id.ok_or_else(|| {
+            Error::InvalidArgs(format!(
+                "cannot update draft state for pull request #{} in '{}': GitHub response omitted its node ID",
+                number, repo
+            ))
+        })?;
+        let mutation = if draft {
+            r#"
+mutation ConvertPullRequestToDraft($pullRequestId: ID!) {
+  convertPullRequestToDraft(input: { pullRequestId: $pullRequestId }) {
+    pullRequest { isDraft }
+  }
+}
+"#
+        } else {
+            r#"
+mutation MarkPullRequestReadyForReview($pullRequestId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
+    pullRequest { isDraft }
+  }
+}
+"#
+        };
+        let payload = serde_json::json!({
+            "query": mutation,
+            "variables": { "pullRequestId": node_id },
+        });
+        let response = self
+            .inner
+            .graphql::<serde_json::Value>(&payload)
+            .await
+            .map_err(|error| map_repo_error(&self.org, repo, error))?;
+        if let Some(errors) = response.get("errors").and_then(serde_json::Value::as_array)
+            && !errors.is_empty()
+        {
+            let messages = errors
+                .iter()
+                .filter_map(|error| error.get("message"))
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(Error::GithubGraphql(if messages.is_empty() {
+                format!(
+                    "failed to update draft state for pull request #{} in '{}'",
+                    number, repo
+                )
+            } else {
+                messages
+            }));
+        }
+        Ok(())
     }
 }
 

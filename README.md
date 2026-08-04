@@ -130,14 +130,31 @@ Main binary (`gh-governor`):
 - `plan`:
   - `--repo <NAME>` (repeatable): limit to specific repos.
   - `--config-base <PATH>`: config root (default `.`).
+  - `--pr-title <TITLE>`: desired title for a managed pull request.
+  - `--pr-message <MESSAGE>`: desired body for a managed pull request.
+  - `--pr-draft <true|false>`: desired draft state for a managed pull request.
 - `apply`:
   - `--repo <NAME>` (repeatable): limit to specific repos.
   - `--config-base <PATH>`: config root (default `.`).
+  - `--pr-title <TITLE>`: set the title when creating or updating a managed PR.
+  - `--pr-message <MESSAGE>`: set the body when creating or updating a managed PR.
+  - `--pr-draft <true|false>`: convert a managed PR to draft or ready-for-review.
 - `generate`:
   - `--repos <NAME[,NAME...]>`: repos to harvest (required).
   - `--org <ORG>`: org to read from (required).
   - `--output <PATH>`: output directory (defaults to `./generated-conf-<org>`).
   - `--format <toml|yml|json>`: output format (default `toml`).
+
+New pull requests remain drafts when `--pr-draft` is omitted. Existing pull
+requests retain their title, message, and draft state for any corresponding
+option that is omitted. For example, to create or update a ready-for-review PR:
+
+```sh
+gh-governor apply \
+  --pr-title "Managed repository updates" \
+  --pr-message "Automated .github updates via gh-governor" \
+  --pr-draft false
+```
 
 ## E2E Tests
 

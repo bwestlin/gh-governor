@@ -5,7 +5,9 @@ use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
 use gh_governor::app::Mode;
-use gh_governor::app::run;
+use gh_governor::app::PullRequestOptions;
+use gh_governor::app::RunOptions;
+use gh_governor::app::run_with_options;
 use gh_governor::config::load_root_config;
 use gh_governor::config::resolve_sets_dir;
 use gh_governor::error::Result;
@@ -41,6 +43,8 @@ enum Command {
         /// Directory containing gh-governor-conf.(toml|yml|yaml|json) and config-sets/
         #[arg(long, default_value = ".")]
         config_base: PathBuf,
+        #[command(flatten)]
+        pull_request: PullRequestArgs,
     },
     /// Apply changes (creates/updates labels and settings)
     Apply {
@@ -49,6 +53,8 @@ enum Command {
         /// Directory containing gh-governor-conf.(toml|yml|yaml|json) and config-sets/
         #[arg(long, default_value = ".")]
         config_base: PathBuf,
+        #[command(flatten)]
+        pull_request: PullRequestArgs,
     },
     /// Generate config files from existing repositories
     Generate {
@@ -65,6 +71,29 @@ enum Command {
         #[arg(long, value_enum, default_value = "toml")]
         format: OutputFormatArg,
     },
+}
+
+#[derive(clap::Args, Clone, Debug, Default)]
+struct PullRequestArgs {
+    /// Title for created or existing gh-governor pull requests
+    #[arg(long, value_name = "TITLE")]
+    pr_title: Option<String>,
+    /// Body/message for created or existing gh-governor pull requests
+    #[arg(long, value_name = "MESSAGE")]
+    pr_message: Option<String>,
+    /// Desired draft state for created or existing gh-governor pull requests
+    #[arg(long, value_name = "BOOL")]
+    pr_draft: Option<bool>,
+}
+
+impl From<PullRequestArgs> for PullRequestOptions {
+    fn from(args: PullRequestArgs) -> Self {
+        Self {
+            title: args.pr_title,
+            message: args.pr_message,
+            draft: args.pr_draft,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -105,33 +134,47 @@ async fn main() -> ExitCode {
 
 async fn run_command(args: Args) -> Result<()> {
     match args.command {
-        Command::Plan { repos, config_base } => {
+        Command::Plan {
+            repos,
+            config_base,
+            pull_request,
+        } => {
             let (root, root_path) = load_root_config(&config_base)?;
             let sets_dir = resolve_sets_dir(&config_base, &root);
             let gh = GithubClient::new(&args.token, root.org.clone())?;
-            run(
+            run_with_options(
                 Mode::Plan,
                 root,
                 root_path,
                 sets_dir,
                 repos,
                 gh,
-                args.verbose,
+                RunOptions {
+                    pull_request: pull_request.into(),
+                    verbose: args.verbose,
+                },
             )
             .await
         }
-        Command::Apply { repos, config_base } => {
+        Command::Apply {
+            repos,
+            config_base,
+            pull_request,
+        } => {
             let (root, root_path) = load_root_config(&config_base)?;
             let sets_dir = resolve_sets_dir(&config_base, &root);
             let gh = GithubClient::new(&args.token, root.org.clone())?;
-            run(
+            run_with_options(
                 Mode::Apply,
                 root,
                 root_path,
                 sets_dir,
                 repos,
                 gh,
-                args.verbose,
+                RunOptions {
+                    pull_request: pull_request.into(),
+                    verbose: args.verbose,
+                },
             )
             .await
         }
@@ -159,5 +202,37 @@ async fn run_command(args: Args) -> Result<()> {
             )
             .await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pull_request_options_for_apply() {
+        let args = Args::try_parse_from([
+            "gh-governor",
+            "--token",
+            "token",
+            "apply",
+            "--pr-title",
+            "Managed updates",
+            "--pr-message",
+            "Changes managed by gh-governor",
+            "--pr-draft",
+            "false",
+        ])
+        .unwrap();
+
+        let Command::Apply { pull_request, .. } = args.command else {
+            panic!("expected apply command");
+        };
+        assert_eq!(pull_request.pr_title.as_deref(), Some("Managed updates"));
+        assert_eq!(
+            pull_request.pr_message.as_deref(),
+            Some("Changes managed by gh-governor")
+        );
+        assert_eq!(pull_request.pr_draft, Some(false));
     }
 }

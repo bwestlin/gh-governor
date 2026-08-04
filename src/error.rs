@@ -48,6 +48,8 @@ pub enum Error {
     GlobGlob(#[from] glob::GlobError),
     #[error("GitHub API error: {0}")]
     Octo(Box<octocrab::Error>),
+    #[error("GitHub GraphQL error: {0}")]
+    GithubGraphql(String),
     #[error(
         "Repository '{org}/{repo}' was not found or the token cannot access it; verify the repository name, token repository access/scopes, and organization SSO authorization"
     )]

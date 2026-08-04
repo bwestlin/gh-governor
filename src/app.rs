@@ -29,6 +29,59 @@ pub enum Mode {
     Apply,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PullRequestOptions {
+    pub title: Option<String>,
+    pub message: Option<String>,
+    pub draft: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RunOptions {
+    pub pull_request: PullRequestOptions,
+    pub verbose: bool,
+}
+
+impl PullRequestOptions {
+    fn creation_draft(&self) -> bool {
+        self.draft.unwrap_or(true)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PullRequestChanges {
+    title: bool,
+    message: bool,
+    draft: bool,
+}
+
+impl PullRequestChanges {
+    fn any(self) -> bool {
+        self.title || self.message || self.draft
+    }
+}
+
+fn pull_request_changes(
+    current_title: Option<&str>,
+    current_message: Option<&str>,
+    current_draft: Option<bool>,
+    desired: &PullRequestOptions,
+) -> PullRequestChanges {
+    PullRequestChanges {
+        title: desired
+            .title
+            .as_deref()
+            .is_some_and(|title| current_title != Some(title)),
+        message: desired
+            .message
+            .as_deref()
+            .is_some_and(|message| current_message != Some(message)),
+        draft: desired
+            .draft
+            .is_some_and(|draft| current_draft != Some(draft)),
+    }
+}
+
 const PR_BRANCH_PREFIX: &str = "gh-governor/updates-";
 
 pub async fn run(
@@ -40,6 +93,30 @@ pub async fn run(
     gh: GithubClient,
     verbose: bool,
 ) -> Result<()> {
+    run_with_options(
+        mode,
+        root,
+        root_path,
+        sets_dir,
+        only_repos,
+        gh,
+        RunOptions {
+            verbose,
+            ..RunOptions::default()
+        },
+    )
+    .await
+}
+
+pub async fn run_with_options(
+    mode: Mode,
+    root: crate::config::RootConfig,
+    root_path: PathBuf,
+    sets_dir: PathBuf,
+    only_repos: Vec<String>,
+    gh: GithubClient,
+    options: RunOptions,
+) -> Result<()> {
     let merged = prepare_merged(&root, &sets_dir, &only_repos)?;
     info!(
         "loaded config for org '{}' from {}",
@@ -49,13 +126,22 @@ pub async fn run(
 
     let oauth_scopes = gh.oauth_scopes().await?;
     let scope_set = oauth_scopes.map(|scopes| scopes.into_iter().collect::<HashSet<String>>());
-    handle_repos(mode, &gh, merged, verbose, scope_set.as_ref()).await
+    handle_repos(
+        mode,
+        &gh,
+        merged,
+        &options.pull_request,
+        options.verbose,
+        scope_set.as_ref(),
+    )
+    .await
 }
 
 async fn handle_repos(
     mode: Mode,
     gh: &GithubClient,
     merged: Vec<(String, MergedRepoConfig)>,
+    pull_request: &PullRequestOptions,
     verbose: bool,
     oauth_scopes: Option<&HashSet<String>>,
 ) -> Result<()> {
@@ -96,6 +182,17 @@ async fn handle_repos(
         let existing_pr = gh
             .find_open_pr_by_head_prefix(&repo_name, PR_BRANCH_PREFIX, &base_branch)
             .await?;
+        let pr_changes = existing_pr
+            .as_ref()
+            .map(|pr| {
+                pull_request_changes(
+                    pr.title.as_deref(),
+                    pr.body.as_deref(),
+                    pr.draft,
+                    pull_request,
+                )
+            })
+            .unwrap_or_default();
         let compare_branch = existing_pr.as_ref().map(|pr| pr.head.ref_field.clone());
 
         let has_workflow_files = merged_cfg
@@ -208,10 +305,15 @@ async fn handle_repos(
                 let (pr_note, pr_branch_display) = if any_file_changes {
                     if let Some(pr) = &existing_pr {
                         let branch = pr.head.ref_field.clone();
+                        let metadata_note = if pr_changes.any() {
+                            " and PR metadata/state"
+                        } else {
+                            ""
+                        };
                         (
                             format!(
-                                "draft PR will be updated for .github file updates (reusing #{})",
-                                pr.number
+                                "PR will be updated for .github file updates{} (reusing #{})",
+                                metadata_note, pr.number
                             ),
                             Some(branch),
                         )
@@ -224,19 +326,26 @@ async fn handle_repos(
                             None,
                         )
                     } else {
+                        let draft_label = if pull_request.creation_draft() {
+                            "draft PR"
+                        } else {
+                            "PR"
+                        };
                         (
-                            "draft PR will be created for .github file updates".to_string(),
+                            format!("{} will be created for .github file updates", draft_label),
                             Some(branch_candidate),
                         )
                     }
                 } else if let Some(pr) = &existing_pr {
-                    (
+                    let note = if pr_changes.any() {
+                        format!("existing PR #{} metadata/state will be updated", pr.number)
+                    } else {
                         format!(
-                            "existing draft PR #{} already present for .github files",
+                            "existing PR #{} already present for .github files",
                             pr.number
-                        ),
-                        Some(pr.head.ref_field.clone()),
-                    )
+                        )
+                    };
+                    (note, Some(pr.head.ref_field.clone()))
                 } else {
                     ("no PR (no .github file changes)".to_string(), None)
                 };
@@ -291,13 +400,25 @@ async fn handle_repos(
                     gh.set_branch_protection(&repo_name, &bp.target).await?;
                 }
 
-                let any_file_changes = !files_add.is_empty() || !files_update.is_empty();
+                let any_file_changes =
+                    !files_add.is_empty() || !files_update.is_empty() || !files_remove.is_empty();
                 let existing_pr = if any_file_changes || existing_pr.is_some() {
                     gh.find_open_pr_by_head_prefix(&repo_name, PR_BRANCH_PREFIX, &base_branch)
                         .await?
                 } else {
                     None
                 };
+                let apply_pr_changes = existing_pr
+                    .as_ref()
+                    .map(|pr| {
+                        pull_request_changes(
+                            pr.title.as_deref(),
+                            pr.body.as_deref(),
+                            pr.draft,
+                            pull_request,
+                        )
+                    })
+                    .unwrap_or_default();
                 let branch_candidate = format!("{PR_BRANCH_PREFIX}{}", base_branch);
                 let branch_blocked = if any_file_changes && existing_pr.is_none() {
                     gh.get_branch_sha_optional(&repo_name, &branch_candidate)
@@ -378,21 +499,53 @@ async fn handle_repos(
                         branch_candidate
                     );
                 } else if let Some(branch) = branch_name.as_deref() {
-                    let pr_title =
+                    let default_pr_title =
                         format!("gh-governor updates ({})", Utc::now().format("%Y-%m-%d"));
-                    let pr_body = Some("Automated .github updates via gh-governor");
+                    let pr_title = pull_request.title.as_deref().unwrap_or(&default_pr_title);
+                    let pr_message = pull_request
+                        .message
+                        .as_deref()
+                        .unwrap_or("Automated .github updates via gh-governor");
                     let mut pr_opt = existing_pr;
+                    let had_existing_pr = pr_opt.is_some();
                     if pr_opt.is_none() && any_file_changes {
                         pr_opt = gh
                             .create_pull_request(
                                 &repo_name,
-                                &pr_title,
+                                pr_title,
                                 branch,
                                 &base_branch,
-                                pr_body,
-                                true,
+                                Some(pr_message),
+                                pull_request.creation_draft(),
                             )
                             .await?;
+                    }
+                    if let Some(pr) = &pr_opt
+                        && had_existing_pr
+                    {
+                        if apply_pr_changes.title || apply_pr_changes.message {
+                            let title = if apply_pr_changes.title {
+                                pull_request.title.as_deref()
+                            } else {
+                                None
+                            };
+                            let message = if apply_pr_changes.message {
+                                pull_request.message.as_deref()
+                            } else {
+                                None
+                            };
+                            gh.update_pull_request_fields(&repo_name, pr.number, title, message)
+                                .await?;
+                        }
+                        if apply_pr_changes.draft {
+                            gh.update_pull_request_draft(
+                                &repo_name,
+                                pr.number,
+                                pr.node_id.as_deref(),
+                                pull_request.draft.unwrap_or(true),
+                            )
+                            .await?;
+                        }
                     }
                     if let Some(pr) = pr_opt {
                         let url =
@@ -405,9 +558,11 @@ async fn handle_repos(
                                         gh.org, repo_name, pr.number
                                     )
                                 });
+                        let is_draft = pull_request.draft.or(pr.draft).unwrap_or(true);
+                        let draft_label = if is_draft { "draft PR" } else { "PR" };
                         pr_status = format!(
-                            "draft PR #{} ({} -> {}) [{}]",
-                            pr.number, branch, base_branch, url
+                            "{} #{} ({} -> {}) [{}]",
+                            draft_label, pr.number, branch, base_branch, url
                         );
                     } else if any_file_changes {
                         pr_status = format!(
@@ -1285,6 +1440,41 @@ fn detect_github_file_conflicts(sets: &[SetDefinition]) -> std::result::Result<(
 mod tests {
     use super::*;
     use serde_yaml::Value;
+
+    #[test]
+    fn omitted_pull_request_options_preserve_existing_metadata() {
+        let options = PullRequestOptions::default();
+
+        assert!(options.creation_draft());
+        assert_eq!(
+            pull_request_changes(
+                Some("Existing title"),
+                Some("Existing message"),
+                Some(false),
+                &options,
+            ),
+            PullRequestChanges::default()
+        );
+    }
+
+    #[test]
+    fn detects_requested_pull_request_metadata_and_state_changes() {
+        let options = PullRequestOptions {
+            title: Some("Managed title".to_string()),
+            message: Some("Managed message".to_string()),
+            draft: Some(false),
+        };
+
+        assert_eq!(
+            pull_request_changes(Some("Old title"), Some("Old message"), Some(true), &options,),
+            PullRequestChanges {
+                title: true,
+                message: true,
+                draft: true,
+            }
+        );
+        assert!(!options.creation_draft());
+    }
 
     fn set_with_tpl(name: &str, path: &str, contents: &str) -> SetDefinition {
         SetDefinition {
